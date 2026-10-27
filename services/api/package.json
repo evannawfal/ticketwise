@@ -1,0 +1,24 @@
+{
+  "name": "@ticketwise/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/local-server.ts",
+    "start": "tsx src/local-server.ts",
+    "migrate": "tsx src/scripts/migrate.ts",
+    "seed": "tsx src/scripts/seed.ts",
+    "reset": "tsx src/scripts/seed.ts --reset"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.700.0",
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "@ticketwise/core": "1.0.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "tsx": "^4.19.0"
+  }
+}

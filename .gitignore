@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.next/
+out/
+cdk.out/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+apps/admin/lib/sample-data.json

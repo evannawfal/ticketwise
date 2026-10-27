@@ -1,0 +1,9 @@
+{
+  "app": "npx tsx bin/app.ts",
+  "context": {
+    "llmProvider": "bedrock",
+    "embeddingProvider": "bedrock",
+    "embeddingDim": 512,
+    "secretName": "ticketwise/app"
+  }
+}

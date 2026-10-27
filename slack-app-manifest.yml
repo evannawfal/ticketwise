@@ -1,0 +1,30 @@
+# Create the Slack app from this manifest: https://api.slack.com/apps > Create New App > From a manifest.
+# Replace YOUR_API_URL with the ApiUrl output from `npm run deploy`.
+display_information:
+  name: Ticketwise
+  description: Answers support questions from your help docs and past tickets
+  background_color: "#2f6fed"
+features:
+  bot_user:
+    display_name: Ticketwise
+    always_online: true
+  slash_commands:
+    - command: /ask
+      url: https://YOUR_API_URL/slack/events
+      description: Ask the knowledge base, or "draft <customer message>"
+      usage_hint: how do I reset 2FA? | draft <customer message>
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - commands
+settings:
+  event_subscriptions:
+    request_url: https://YOUR_API_URL/slack/events
+    bot_events:
+      - app_mention
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

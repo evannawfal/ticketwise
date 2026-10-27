@@ -1,0 +1,22 @@
+{
+  "name": "@ticketwise/admin",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "sample": "node ../../scripts/build-sample-json.mjs",
+    "dev": "npm run sample && next dev -p 3000",
+    "build": "npm run sample && next build",
+    "build:demo": "npm run sample && NEXT_PUBLIC_DEMO=1 NEXT_BASE_PATH=/ticketwise next build",
+    "typecheck": "npm run sample && next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@ticketwise/core": "1.0.0",
+    "next": "15.5.28",
+    "react": "19.1.10",
+    "react-dom": "19.1.10"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0"
+  }
+}

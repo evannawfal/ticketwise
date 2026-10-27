@@ -1,0 +1,34 @@
+{
+  "name": "ticketwise",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI support assistant: answers questions from your help docs and past tickets with citations, drafts agent replies, and works in Slack. Runs on AWS Lambda + Postgres/pgvector.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/core",
+    "services/api",
+    "apps/admin",
+    "infra"
+  ],
+  "scripts": {
+    "build": "npm run build -w @ticketwise/core",
+    "typecheck": "npm run build && npm run typecheck -w @ticketwise/api && npm run typecheck -w @ticketwise/admin && npm run typecheck -w @ticketwise/infra",
+    "test": "npm run build && vitest run",
+    "db:migrate": "npm run migrate -w @ticketwise/api",
+    "db:seed": "npm run seed -w @ticketwise/api",
+    "dev:api": "npm run dev -w @ticketwise/api",
+    "dev:admin": "npm run dev -w @ticketwise/admin",
+    "build:demo": "npm run build && npm run build:demo -w @ticketwise/admin",
+    "synth": "npm run build && npm run synth -w @ticketwise/infra",
+    "deploy": "npm run build && npm run build -w @ticketwise/admin && npm run deploy -w @ticketwise/infra",
+    "db:reset": "npm run reset -w @ticketwise/api"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
