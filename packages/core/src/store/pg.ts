@@ -44,14 +44,19 @@ CREATE INDEX IF NOT EXISTS questions_created_idx ON questions (created_at);
 
 const toVector = (v: number[]) => `[${v.join(",")}]`;
 
-export function createPool(connectionString: string): pg.Pool {
-  const needsSsl = !/localhost|127\.0\.0\.1/.test(connectionString) && !/sslmode=disable/.test(connectionString);
+export function createPool(connectionString: string, opts: { allowSelfSignedCert?: boolean } = {}): pg.Pool {
+  const local = /@(localhost|127\.0\.0\.1)[:/]/.test(connectionString);
+  const needsSsl = !local && !/sslmode=disable/.test(connectionString);
+  // pg lets sslmode in the URL override the ssl object below, so strip it.
+  const url = connectionString.replace(/([?&])sslmode=[^&]*&?/, "$1").replace(/[?&]$/, "");
   return new pg.Pool({
-    connectionString,
+    connectionString: url,
     // Lambda: keep the pool tiny; each concurrent invocation gets its own container.
     max: 2,
     idleTimeoutMillis: 30_000,
-    ssl: needsSsl ? { rejectUnauthorized: false } : undefined,
+    // Verify the server certificate by default. Neon, Supabase and RDS all use
+    // publicly trusted certs; only set PG_ALLOW_SELF_SIGNED=1 for a private CA.
+    ssl: needsSsl ? { rejectUnauthorized: !(opts.allowSelfSignedCert ?? process.env.PG_ALLOW_SELF_SIGNED === "1") } : undefined,
   });
 }
 
