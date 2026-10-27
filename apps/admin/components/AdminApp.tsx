@@ -171,7 +171,9 @@ function AskView({ backend, onDone }: { backend: Backend | null; onDone: () => v
   const [question, setQuestion] = useState("");
   const { result, loading, error, run } = useRun(backend, onDone);
   const { flash, onCite } = useCiteFlash();
-  const submit = (q = question) => q.trim() && run((b) => b.ask(q));
+  const submit = (q = question) => {
+    if (q.trim()) run((b) => b.ask(q));
+  };
 
   return (
     <div className="stack">
@@ -184,7 +186,7 @@ function AskView({ backend, onDone }: { backend: Backend | null; onDone: () => v
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !loading) submit();
           }}
           placeholder="e.g. How do I reset 2FA for a customer who lost their phone?"
           rows={3}
@@ -250,7 +252,16 @@ function DraftView({ backend, onDone }: { backend: Backend | null; onDone: () =>
         <p>Paste a customer&apos;s message. You get a reply to review, edit and send, with sources to check.</p>
       </div>
       <div className="card stack">
-        <textarea value={ticket} onChange={(e) => setTicket(e.target.value)} placeholder="Paste the customer's message…" rows={5} aria-label="Customer message" />
+        <textarea
+          value={ticket}
+          onChange={(e) => setTicket(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && ticket.trim() && !loading) run((b) => b.draft(ticket));
+          }}
+          placeholder="Paste the customer's message…"
+          rows={5}
+          aria-label="Customer message"
+        />
         <div className="row">
           <button className="chip" onClick={() => setTicket(EXAMPLE_TICKET)}>
             Use an example ticket
