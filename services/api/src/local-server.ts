@@ -8,12 +8,28 @@ import { parseSlackRequest, runSlackJob, verifySlackSignature } from "./slack.js
  * Local dev server: same router and Slack logic as the Lambdas, but Slack jobs
  * run in-process instead of going through SQS.
  */
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+class BodyTooLarge extends Error {}
+
+/** Read the request body, giving up past 2 MB so one request can't exhaust memory. */
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.setEncoding("utf8");
-    req.on("data", (c) => (data += c));
-    req.on("end", () => resolve(data));
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (c: Buffer) => {
+      if (tooLarge) return; // keep draining so we can still send a 413
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        tooLarge = true;
+        chunks.length = 0;
+        reject(new BodyTooLarge());
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -30,7 +46,14 @@ const router = createRouter({
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${port}`);
-  const body = await readBody(req);
+  let body: string;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    if (err instanceof BodyTooLarge) res.writeHead(413, { connection: "close" }).end("request body too large");
+    else res.writeHead(400).end("bad request");
+    return;
+  }
   const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
 
   if (url.pathname === "/slack/events" && req.method === "POST") {
