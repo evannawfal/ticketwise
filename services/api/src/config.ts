@@ -62,16 +62,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<AppCon
       openaiApiKey: values.OPENAI_API_KEY || undefined,
       llmProvider: provider(values.LLM_PROVIDER, "local"),
       embeddingProvider: provider(values.EMBEDDING_PROVIDER, "local"),
-      embeddingDim: Number(values.EMBEDDING_DIM ?? 512),
+      embeddingDim: parseEmbeddingDim(values.EMBEDDING_DIM, values.EMBEDDING_PROVIDER),
       bedrockModelId: values.BEDROCK_MODEL_ID || undefined,
       openaiModel: values.OPENAI_MODEL || undefined,
-      minScore: values.MIN_SCORE ? Number(values.MIN_SCORE) : undefined,
+      minScore: parseMinScore(values.MIN_SCORE),
       allowedOrigin: values.ALLOWED_ORIGIN || "*",
       slackQueueUrl: values.SLACK_QUEUE_URL || undefined,
     };
   })();
   cachedConfig.catch(() => (cachedConfig = undefined));
   return cachedConfig;
+}
+
+export function parseEmbeddingDim(raw: string | undefined, provider: string | undefined): number {
+  const dim = Number(raw ?? 512);
+  if (!Number.isInteger(dim) || dim < 1 || dim > 2000) {
+    throw new Error(`EMBEDDING_DIM must be a whole number between 1 and 2000 (got "${raw}")`);
+  }
+  // Titan Text Embeddings V2 only returns these sizes.
+  if ((provider ?? "").toLowerCase() === "bedrock" && ![256, 512, 1024].includes(dim)) {
+    throw new Error(`EMBEDDING_DIM must be 256, 512 or 1024 for Bedrock Titan embeddings (got ${dim})`);
+  }
+  return dim;
+}
+
+export function parseMinScore(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v < 0 || v > 1) throw new Error(`MIN_SCORE must be between 0 and 1 (got "${raw}")`);
+  return v;
 }
 
 /** Only for tests. */

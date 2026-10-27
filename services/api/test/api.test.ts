@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { ExtractiveLlm, LocalHashEmbeddings, MemoryStore, SupportAssistant } from "@ticketwise/core";
 import { PgVectorStore, createPool, migrate } from "@ticketwise/core/pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { parseEmbeddingDim, parseMinScore } from "../src/config.js";
 import { createRouter, type HttpRequest } from "../src/http.js";
 import { parseSlackRequest, runSlackJob, verifySlackSignature } from "../src/slack.js";
 import { sampleDocs } from "../../../packages/core/test/helpers.js";
@@ -76,6 +77,18 @@ describe("HTTP API", () => {
     expect((await handle(req("DELETE", `/documents/${id}`))).statusCode).toBe(404);
     const list = JSON.parse((await handle(req("GET", "/documents"))).body);
     expect(list.documents).toHaveLength(1);
+  });
+});
+
+describe("config parsing", () => {
+  it("validates embedding size and score cutoff", () => {
+    expect(parseEmbeddingDim(undefined, "local")).toBe(512);
+    expect(parseEmbeddingDim("1024", "bedrock")).toBe(1024);
+    expect(() => parseEmbeddingDim("768", "bedrock")).toThrow(/256, 512 or 1024/);
+    expect(() => parseEmbeddingDim("abc", "local")).toThrow(/whole number/);
+    expect(parseMinScore("")).toBeUndefined();
+    expect(parseMinScore("0.25")).toBe(0.25);
+    expect(() => parseMinScore("5")).toThrow(/between 0 and 1/);
   });
 });
 
