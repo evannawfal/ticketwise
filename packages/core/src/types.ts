@@ -87,6 +87,12 @@ export interface AssistantResult {
   grounding: Grounding | null;
   model: string;
   latencyMs: number;
+  /** Tokens the model reported, when the provider reports them. */
+  usage?: { inputTokens: number; outputTokens: number };
+  /** Time spent waiting in the request queue, across attempts. */
+  queuedMs?: number;
+  /** Model calls retried after rate limits or transient errors. */
+  retries?: number;
 }
 
 /** A retrieved source as the client sees it before the answer arrives. */
@@ -148,7 +154,9 @@ export interface GenerateRequest {
 export type LlmChunk =
   | { type: "text"; text: string }
   | { type: "usage"; inputTokens: number; outputTokens: number }
-  | { type: "status"; stage: "queued" | "retrying"; message: string };
+  | { type: "status"; stage: "queued" | "retrying"; message: string }
+  /** Sent when a queued call gets its turn (attempt 0 is the first try). */
+  | { type: "queue"; waitedMs: number; attempt: number };
 
 export interface LlmProvider {
   readonly name: string;

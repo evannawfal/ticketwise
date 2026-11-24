@@ -1,9 +1,17 @@
 import { createHmac } from "node:crypto";
-import { ExtractiveLlm, LocalHashEmbeddings, MemoryStore, SupportAssistant } from "@ticketwise/core";
+import {
+  ExtractiveLlm,
+  LocalHashEmbeddings,
+  MemoryStore,
+  ProviderError,
+  QueueFullError,
+  QueueTimeoutError,
+  SupportAssistant,
+} from "@ticketwise/core";
 import { PgVectorStore, createPool, migrate } from "@ticketwise/core/pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { parseEmbeddingDim, parseMinScore } from "../src/config.js";
-import { createRouter, type HttpRequest } from "../src/http.js";
+import { parseEmbeddingDim, parseLimits, parseMinScore } from "../src/config.js";
+import { createRouter, describeError, type HttpRequest } from "../src/http.js";
 import { parseSlackRequest, runSlackJob, verifySlackSignature } from "../src/slack.js";
 import { sampleDocs } from "../../../packages/core/test/helpers.js";
 
@@ -89,6 +97,34 @@ describe("config parsing", () => {
     expect(parseMinScore("")).toBeUndefined();
     expect(parseMinScore("0.25")).toBe(0.25);
     expect(() => parseMinScore("5")).toThrow(/between 0 and 1/);
+  });
+
+  it("reads queue and retry limits with safe defaults", () => {
+    expect(parseLimits({})).toEqual({
+      maxConcurrent: 4,
+      requestsPerMinute: 50,
+      tokensPerMinute: 100_000,
+      maxQueue: 100,
+      queueTimeoutMs: 60_000,
+      maxRetries: 4,
+      sharedBudget: false,
+    });
+    expect(parseLimits({ LLM_MAX_CONCURRENT: "8", LLM_SHARED_BUDGET: "1" })).toMatchObject({ maxConcurrent: 8, sharedBudget: true });
+    expect(() => parseLimits({ LLM_MAX_CONCURRENT: "0" })).toThrow(/at least 1/);
+    expect(() => parseLimits({ LLM_TOKENS_PER_MINUTE: "lots" })).toThrow(/whole number/);
+  });
+});
+
+describe("error responses", () => {
+  it("tells clients when to come back instead of failing with 500", () => {
+    expect(describeError(new QueueFullError(5000))).toMatchObject({ status: 429, retryAfterMs: 5000 });
+    expect(describeError(new QueueTimeoutError(60_000))).toMatchObject({ status: 503 });
+    expect(describeError(new ProviderError("x", 429, 2000))).toMatchObject({ status: 503, retryAfterMs: 2000 });
+    expect(describeError(new ProviderError("secret detail", 500))).toEqual({
+      status: 502,
+      message: "The model provider returned an error. Try again in a moment.",
+    });
+    expect(describeError(new Error("question is required"))).toMatchObject({ status: 400 });
   });
 });
 

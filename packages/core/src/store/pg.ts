@@ -1,4 +1,5 @@
 import pg from "pg";
+import { RATE_LIMIT_SQL } from "./pg-budget.js";
 import type { ChunkWithEmbedding, DocumentInput, DocumentRecord, SearchHit, Stats, VectorStore } from "../types.js";
 
 export function schemaSql(dimensions: number): string {
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS questions (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS questions_created_idx ON questions (created_at);
+${RATE_LIMIT_SQL}
 `;
 }
 
@@ -185,3 +187,5 @@ export class PgVectorStore implements VectorStore {
     };
   }
 }
+
+export { PgBudget } from "./pg-budget.js";

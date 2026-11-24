@@ -4,12 +4,16 @@ import {
   LocalHashEmbeddings,
   OpenAiEmbeddings,
   OpenAiLlm,
+  MemoryBudget,
+  RequestQueue,
+  ResilientEmbeddings,
+  ResilientLlm,
   SupportAssistant,
   type EmbeddingProvider,
   type LlmProvider,
 } from "@ticketwise/core";
 import { BedrockEmbeddings, BedrockLlm } from "@ticketwise/core/bedrock";
-import { PgVectorStore, createPool } from "@ticketwise/core/pg";
+import { PgBudget, PgVectorStore, createPool } from "@ticketwise/core/pg";
 import type pg from "pg";
 
 export interface AppConfig {
@@ -26,6 +30,38 @@ export interface AppConfig {
   minScore?: number;
   allowedOrigin: string;
   slackQueueUrl?: string;
+  limits: LimitsConfig;
+}
+
+/** How model calls are queued and retried. See the README section "Many users at once". */
+export interface LimitsConfig {
+  maxConcurrent: number;
+  requestsPerMinute: number;
+  tokensPerMinute: number;
+  maxQueue: number;
+  queueTimeoutMs: number;
+  maxRetries: number;
+  /** Keep the budget in Postgres so every Lambda container shares one limit. */
+  sharedBudget: boolean;
+}
+
+export function parseLimits(env: Record<string, string | undefined>): LimitsConfig {
+  const num = (key: string, fallback: number, min: number) => {
+    const raw = env[key];
+    if (raw === undefined || raw === "") return fallback;
+    const v = Number(raw);
+    if (!Number.isInteger(v) || v < min) throw new Error(`${key} must be a whole number of at least ${min} (got "${raw}")`);
+    return v;
+  };
+  return {
+    maxConcurrent: num("LLM_MAX_CONCURRENT", 4, 1),
+    requestsPerMinute: num("LLM_REQUESTS_PER_MINUTE", 50, 1),
+    tokensPerMinute: num("LLM_TOKENS_PER_MINUTE", 100_000, 100),
+    maxQueue: num("LLM_MAX_QUEUE", 100, 0),
+    queueTimeoutMs: num("LLM_QUEUE_TIMEOUT_MS", 60_000, 1000),
+    maxRetries: num("LLM_MAX_RETRIES", 4, 0),
+    sharedBudget: env.LLM_SHARED_BUDGET === "1" || env.LLM_SHARED_BUDGET === "true",
+  };
 }
 
 const SECRET_KEYS = ["DATABASE_URL", "ADMIN_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "OPENAI_API_KEY"] as const;
@@ -68,6 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<AppCon
       minScore: parseMinScore(values.MIN_SCORE),
       allowedOrigin: values.ALLOWED_ORIGIN || "*",
       slackQueueUrl: values.SLACK_QUEUE_URL || undefined,
+      limits: parseLimits(values),
     };
   })();
   cachedConfig.catch(() => (cachedConfig = undefined));
@@ -128,6 +165,7 @@ export interface App {
   pool: pg.Pool;
   store: PgVectorStore;
   assistant: SupportAssistant;
+  queue: RequestQueue;
 }
 
 let cachedApp: Promise<App> | undefined;
@@ -141,14 +179,23 @@ export function getApp(): Promise<App> {
     // so the relevance cutoff depends on the embedding provider.
     const local = config.embeddingProvider === "local";
     const minScore = config.minScore ?? (local ? 0.12 : 0.3);
+    const { limits } = config;
+    const budgetLimits = { requestsPerMinute: limits.requestsPerMinute, tokensPerMinute: limits.tokensPerMinute };
+    const queue = new RequestQueue({
+      maxConcurrent: limits.maxConcurrent,
+      maxQueue: limits.maxQueue,
+      timeoutMs: limits.queueTimeoutMs,
+      budget: limits.sharedBudget ? new PgBudget(pool, budgetLimits) : new MemoryBudget(budgetLimits),
+    });
+    const retry = { maxRetries: limits.maxRetries };
     const assistant = new SupportAssistant({
       store,
-      embeddings: makeEmbeddings(config),
-      llm: makeLlm(config),
+      embeddings: new ResilientEmbeddings(makeEmbeddings(config), retry),
+      llm: new ResilientLlm(makeLlm(config), { queue, retry }),
       minScore,
       minCoverage: local ? 0.3 : 0.1,
     });
-    return { config, pool, store, assistant };
+    return { config, pool, store, assistant, queue };
   })();
   cachedApp.catch(() => (cachedApp = undefined));
   return cachedApp;

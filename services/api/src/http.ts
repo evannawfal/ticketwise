@@ -1,5 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
-import { ticketsFromCsv, type SupportAssistant, type VectorStore } from "@ticketwise/core";
+import {
+  ProviderError,
+  QueueFullError,
+  QueueTimeoutError,
+  ticketsFromCsv,
+  type SupportAssistant,
+  type VectorStore,
+} from "@ticketwise/core";
 
 export interface HttpRequest {
   method: string;
@@ -63,6 +70,24 @@ function str(body: Record<string, unknown>, key: string, required = true): strin
   }
   if (typeof v !== "string") throw new HttpError(400, `"${key}" must be a string`);
   return v;
+}
+
+/** Map any error to an HTTP status and a message that is safe to show. */
+export function describeError(err: unknown): { status: number; message: string; retryAfterMs?: number } {
+  if (err instanceof HttpError) return { status: err.status, message: err.message };
+  if (err instanceof QueueFullError) return { status: 429, message: err.message, retryAfterMs: err.retryAfterMs };
+  if (err instanceof QueueTimeoutError) return { status: 503, message: err.message, retryAfterMs: 5000 };
+  if (err instanceof ProviderError) {
+    console.error("model provider error", err.message);
+    return err.status === 429
+      ? { status: 503, message: "The model provider is busy. Try again in a moment.", retryAfterMs: err.retryAfterMs ?? 5000 }
+      : { status: 502, message: "The model provider returned an error. Try again in a moment." };
+  }
+  const message = (err as Error)?.message ?? "error";
+  // Input validation errors thrown by the core library.
+  if (/is required|too long/.test(message)) return { status: 400, message };
+  console.error("unhandled error", err);
+  return { status: 500, message: "internal error" };
 }
 
 export function createRouter(deps: RouterDeps) {
@@ -147,12 +172,10 @@ export function createRouter(deps: RouterDeps) {
     try {
       return await route(req);
     } catch (err) {
-      if (err instanceof HttpError) return json(err.status, { error: err.message });
-      const message = (err as Error).message ?? "error";
-      // Input validation errors thrown by the core library.
-      if (/is required|too long/.test(message)) return json(400, { error: message });
-      console.error("unhandled error", err);
-      return json(500, { error: "internal error" });
+      const { status, message, retryAfterMs } = describeError(err);
+      const res = json(status, { error: message });
+      if (retryAfterMs) res.headers["retry-after"] = String(Math.ceil(retryAfterMs / 1000));
+      return res;
     }
   };
 }

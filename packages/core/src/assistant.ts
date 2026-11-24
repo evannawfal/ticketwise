@@ -279,21 +279,36 @@ export class SupportAssistant {
       maxTokens: task === "answer" ? 500 : 800,
     };
     let output = "";
+    let usage: AssistantResult["usage"];
+    let queuedMs = 0;
+    let retries = 0;
     for await (const chunk of llmStream(this.opts.llm, req, opts.signal)) {
       if (chunk.type === "text" && chunk.text) {
         output += chunk.text;
         yield { type: "delta", text: chunk.text };
       } else if (chunk.type === "status") {
         yield { type: "status", stage: chunk.stage, message: chunk.message };
+      } else if (chunk.type === "usage") {
+        usage = { inputTokens: chunk.inputTokens, outputTokens: chunk.outputTokens };
+      } else if (chunk.type === "queue") {
+        queuedMs += chunk.waitedMs;
+        retries = chunk.attempt;
       }
     }
     output = output.trim();
+    const callStats = { ...(usage ? { usage } : {}), queuedMs, retries };
 
     const declined = task === "answer" && output.startsWith(ABSTAIN_TEXT.slice(0, 30)) && !extractCitationNumbers(output).length;
     const result = await finish(
       declined || !hits.length
-        ? { text: output, citations: [], mode: "abstained", lowConfidence: true, grounding: null }
-        : { text: output, ...groundAnswer(output, hits, task === "answer" ? text : undefined), mode: "generated", lowConfidence: false },
+        ? { text: output, citations: [], mode: "abstained", lowConfidence: true, grounding: null, ...callStats }
+        : {
+            text: output,
+            ...groundAnswer(output, hits, task === "answer" ? text : undefined),
+            mode: "generated",
+            lowConfidence: false,
+            ...callStats,
+          },
     );
     yield { type: "done", result };
     return result;
