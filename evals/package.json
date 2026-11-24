@@ -6,7 +6,9 @@
   "scripts": {
     "run": "tsx src/run.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "calibrate": "tsx src/calibrate.ts"
+    "calibrate": "tsx src/calibrate.ts",
+    "compare": "tsx src/compare.ts",
+    "record": "tsx src/record.ts"
   },
   "dependencies": {
     "@ticketwise/core": "1.0.0"
