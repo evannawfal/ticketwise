@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./chunk.js";
 export * from "./tickets.js";
 export * from "./text.js";
+export * from "./grounding.js";
 export * from "./prompts.js";
 export * from "./assistant.js";
 export * from "./slack-format.js";

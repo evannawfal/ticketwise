@@ -1,0 +1,26 @@
+[
+  {
+    "id": "refund-annual",
+    "question": "Can I get a refund on an annual plan?",
+    "answer": "Yes, within 14 days of the purchase or renewal date you can get a full refund on an annual plan. After 14 days annual plans aren't refundable, but you can turn off auto-renew so the plan ends at the end of the term. If the plan renewed by accident and nobody has used the workspace since, contact us within 30 days of the renewal. Refunds go back to the original payment method and take 5 to 10 business days to appear.",
+    "sources": [{ "title": "Refund policy", "url": "https://help.northpine.example/refunds" }]
+  },
+  {
+    "id": "pay-by-invoice",
+    "question": "Can we pay by invoice?",
+    "answer": "Annual Business plans over $5,000 can pay by invoice with net-30 terms. Contact our sales team to set it up. All other plans are paid by Visa, Mastercard or American Express.",
+    "sources": [{ "title": "Billing and plans", "url": "https://help.northpine.example/billing" }]
+  },
+  {
+    "id": "restore-deleted-workspace",
+    "question": "Can a deleted workspace be restored?",
+    "answer": "Yes, for 30 days. Contact support from the Owner's email address within 30 days of deleting the workspace and we'll restore it with all boards, tasks and attachments. After 30 days the data is permanently deleted and can't be recovered.",
+    "sources": [{ "title": "Managing members, roles and data export", "url": "https://help.northpine.example/members" }]
+  },
+  {
+    "id": "only-owner-lost-2fa",
+    "question": "I'm the only owner and I lost my 2FA device. How do I get back in?",
+    "answer": "If you still have a backup code, sign in with it and set up 2FA on your new device. If you don't, email support from your account email address. To confirm it's you, we'll ask for the last 4 digits of the card on file and the date of your most recent invoice. We will never ask for your password. Once 2FA is reset you'll be signed out everywhere and asked to set it up again.",
+    "sources": [{ "title": "Account security and two-factor authentication", "url": "https://help.northpine.example/security" }]
+  }
+]
