@@ -38,6 +38,15 @@ export interface SearchHit {
   score: number;
 }
 
+/** An exact passage from a source: always `content.slice(start, end)` of the cited chunk. */
+export interface Quote {
+  text: string;
+  start: number;
+  end: number;
+  /** Share of the citing claim's words found in the passage, 0..1. */
+  support: number;
+}
+
 export interface Citation {
   n: number;
   documentId: string;
@@ -47,16 +56,56 @@ export interface Citation {
   section: string | null;
   snippet: string;
   score: number;
+  /** Passages quoted word for word from this source, one per claim that cites it. */
+  quotes: Quote[];
 }
+
+export interface ClaimCheck {
+  text: string;
+  cites: number[];
+  /** Best support any cited quote gives this claim, 0..1. */
+  support: number;
+  grounded: boolean;
+}
+
+export interface Grounding {
+  claims: ClaimCheck[];
+  grounded: number;
+  total: number;
+}
+
+/** generated: written by the model from sources. abstained: nothing relevant, so no answer. */
+export type AnswerMode = "generated" | "abstained";
 
 export interface AssistantResult {
   text: string;
   citations: Citation[];
+  mode: AnswerMode;
   /** True when the retrieved sources were too weak to answer confidently. */
   lowConfidence: boolean;
+  /** Per-sentence check that each claim is backed by a quoted passage. Null when nothing was generated. */
+  grounding: Grounding | null;
   model: string;
   latencyMs: number;
 }
+
+/** A retrieved source as the client sees it before the answer arrives. */
+export interface SourcePreview {
+  n: number;
+  documentId: string;
+  title: string;
+  url: string | null;
+  sourceType: SourceType;
+  section: string | null;
+  score: number;
+}
+
+/** Events sent to clients while an answer streams. */
+export type StreamEvent =
+  | { type: "sources"; sources: SourcePreview[] }
+  | { type: "status"; stage: "queued" | "retrying"; message: string }
+  | { type: "delta"; text: string }
+  | { type: "done"; result: AssistantResult };
 
 export interface Stats {
   documents: number;
@@ -95,7 +144,15 @@ export interface GenerateRequest {
   question?: string;
 }
 
+/** What a provider yields while streaming. */
+export type LlmChunk =
+  | { type: "text"; text: string }
+  | { type: "usage"; inputTokens: number; outputTokens: number }
+  | { type: "status"; stage: "queued" | "retrying"; message: string };
+
 export interface LlmProvider {
   readonly name: string;
   generate(req: GenerateRequest): Promise<string>;
+  /** Token-by-token output. Providers without it fall back to generate(). */
+  stream?(req: GenerateRequest, signal?: AbortSignal): AsyncIterable<LlmChunk>;
 }

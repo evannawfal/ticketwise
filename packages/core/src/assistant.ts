@@ -1,14 +1,23 @@
 import { chunkMarkdown, embeddingText } from "./chunk.js";
-import { ANSWER_SYSTEM, DRAFT_SYSTEM, answerUserMessage, draftUserMessage } from "./prompts.js";
+import { splitClaims } from "./grounding.js";
+import { ABSTAIN_TEXT, ANSWER_SYSTEM, DRAFT_SYSTEM, answerUserMessage, draftUserMessage } from "./prompts.js";
+import { bestQuote } from "./quotes.js";
 import { tokenize, truncate } from "./text.js";
 import type {
   AssistantResult,
   Citation,
+  ClaimCheck,
   DocumentInput,
   DocumentRecord,
   EmbeddingProvider,
+  GenerateRequest,
+  Grounding,
+  LlmChunk,
   LlmProvider,
+  Quote,
   SearchHit,
+  SourcePreview,
+  StreamEvent,
   VectorStore,
 } from "./types.js";
 
@@ -30,7 +39,16 @@ export interface AssistantOptions {
   minCoverage?: number;
 }
 
+export interface RunOptions {
+  /** Where the question came from, for usage stats ("web", "slack", "eval"...). */
+  channel?: string;
+  signal?: AbortSignal;
+}
+
 const MAX_DOC_CHARS = 200_000;
+const MAX_INPUT_CHARS = 8000;
+/** A claim is grounded when a quoted passage from a source it cites covers this share of its words. */
+export const GROUNDED_SUPPORT = 0.6;
 
 /** Pull [n] / [n, m] markers out of model output. */
 export function extractCitationNumbers(text: string): number[] {
@@ -62,6 +80,75 @@ export function diversify(hits: SearchHit[], maxPerDocument: number, k: number):
     if (out.length >= k) break;
   }
   return out;
+}
+
+function snippetOf(content: string): string {
+  return truncate(
+    content
+      .replace(/^(Customer|Resolution|Tags):\s*/gm, "")
+      .replace(/^\s*(?:[-*]|\d+\.)\s+/gm, "")
+      .replace(/\*\*|`/g, ""),
+    220,
+  );
+}
+
+const round = (x: number) => Math.round(x * 1000) / 1000;
+
+/**
+ * Map [n] markers to sources and quote, for each claim, the exact passage in
+ * the cited source that backs it. Also scores every claim, so a sentence with
+ * no citation, or one whose citation doesn't actually say it, is flagged.
+ */
+export function groundAnswer(
+  text: string,
+  hits: SearchHit[],
+  question?: string,
+): { citations: Citation[]; grounding: Grounding } {
+  const valid = (n: number) => n >= 1 && n <= hits.length;
+  const quotesByN = new Map<number, Quote[]>();
+  const checks: ClaimCheck[] = [];
+
+  for (const claim of splitClaims(text)) {
+    const cites = claim.cites.filter(valid);
+    let support = 0;
+    for (const n of cites) {
+      const h = hits[n - 1];
+      const q = bestQuote(claim.text, h.content, h.sourceType, question);
+      if (!q) continue;
+      support = Math.max(support, q.support);
+      const list = quotesByN.get(n) ?? [];
+      if (!list.some((x) => x.start === q.start && x.end === q.end)) list.push(q);
+      quotesByN.set(n, list);
+    }
+    checks.push({ text: claim.text, cites, support: round(support), grounded: cites.length > 0 && support >= GROUNDED_SUPPORT });
+  }
+
+  let used = extractCitationNumbers(text).filter(valid);
+  // The model cited nothing: still show the top sources so an agent can check.
+  if (!used.length) used = hits.slice(0, 3).map((_, i) => i + 1);
+  const citations = used.map((n): Citation => {
+    const h = hits[n - 1];
+    return {
+      n,
+      documentId: h.documentId,
+      title: h.title,
+      url: h.url,
+      sourceType: h.sourceType,
+      section: cleanSection(h.title, h.section),
+      snippet: snippetOf(h.content),
+      score: round(h.score),
+      quotes: (quotesByN.get(n) ?? []).sort((a, b) => a.start - b.start),
+    };
+  });
+  return { citations, grounding: { claims: checks, grounded: checks.filter((c) => c.grounded).length, total: checks.length } };
+}
+
+async function* llmStream(llm: LlmProvider, req: GenerateRequest, signal?: AbortSignal): AsyncIterable<LlmChunk> {
+  if (llm.stream) {
+    yield* llm.stream(req, signal);
+  } else {
+    yield { type: "text", text: await llm.generate(req) };
+  }
 }
 
 export class SupportAssistant {
@@ -99,14 +186,18 @@ export class SupportAssistant {
     );
   }
 
+  async retrieve(query: string): Promise<SearchHit[]> {
+    const [vector] = await this.opts.embeddings.embed([query], "query");
+    return this.retrieveWith(query, vector);
+  }
+
   /**
    * Hybrid retrieval: vector search finds candidates, then a light keyword
    * check re-ranks them. Chunks that share no words with the question need a
    * much stronger vector match to survive, which filters out "close in vector
    * space but unrelated" results that make models hallucinate.
    */
-  async retrieve(query: string): Promise<SearchHit[]> {
-    const [vector] = await this.opts.embeddings.embed([query], "query");
+  private async retrieveWith(query: string, vector: number[]): Promise<SearchHit[]> {
     const raw = await this.opts.store.search(vector, this.topK * 4);
     const queryTerms = [...new Set(tokenize(query))];
     const strongVector = Math.max(this.minScore * 2, 0.5);
@@ -136,68 +227,90 @@ export class SupportAssistant {
     return diversify(scored, this.maxPerDocument, this.topK);
   }
 
-  private toCitations(text: string, hits: SearchHit[]): Citation[] {
-    let used = extractCitationNumbers(text).filter((n) => n >= 1 && n <= hits.length);
-    if (!used.length) used = hits.slice(0, 3).map((_, i) => i + 1);
-    return used.map((n) => {
-      const h = hits[n - 1];
-      return {
-        n,
-        documentId: h.documentId,
-        title: h.title,
-        url: h.url,
-        sourceType: h.sourceType,
-        section: cleanSection(h.title, h.section),
-        snippet: truncate(
-          h.content
-            .replace(/^(Customer|Resolution|Tags):\s*/gm, "")
-            .replace(/^\s*(?:[-*]|\d+\.)\s+/gm, "")
-            .replace(/\*\*|`/g, ""),
-          220,
-        ),
-        score: Math.round(h.score * 1000) / 1000,
-      };
-    });
-  }
-
-  private async run(task: "answer" | "draft", input: string, channel: string): Promise<AssistantResult> {
+  /**
+   * Answer (or draft a reply) as a stream: the retrieved sources first, then the
+   * text as the model writes it, then the final result with citations, exact
+   * quotes and a per-claim grounding check.
+   */
+  async *stream(task: "answer" | "draft", input: string, opts: RunOptions = {}): AsyncGenerator<StreamEvent, AssistantResult> {
     const started = Date.now();
     const text = input.trim();
     if (!text) throw new Error(task === "answer" ? "question is required" : "ticket text is required");
-    if (text.length > 8000) throw new Error("input is too long (max 8000 characters)");
+    if (text.length > MAX_INPUT_CHARS) throw new Error(`input is too long (max ${MAX_INPUT_CHARS} characters)`);
 
     const hits = await this.retrieve(text);
-    let output: string;
-    let citations: Citation[] = [];
-    const lowConfidence = hits.length === 0;
+    const finish = async (r: Omit<AssistantResult, "latencyMs" | "model">): Promise<AssistantResult> => {
+      const latencyMs = Date.now() - started;
+      await this.opts.store
+        .logQuestion(truncate(text, 500), `${opts.channel ?? "api"}:${task}`, latencyMs)
+        .catch(() => undefined);
+      return { ...r, model: this.modelName, latencyMs };
+    };
 
-    if (lowConfidence && task === "answer") {
+    if (!hits.length && task === "answer") {
       // Nothing relevant: skip the model call entirely. Saves money and avoids made-up answers.
-      output = "I couldn't find this in the knowledge base. It may need a human agent.";
-    } else {
-      output = await this.opts.llm.generate({
-        task,
-        question: text,
-        sources: hits,
-        system: task === "answer" ? ANSWER_SYSTEM : DRAFT_SYSTEM,
-        messages: [
-          { role: "user", content: task === "answer" ? answerUserMessage(text, hits) : draftUserMessage(text, hits) },
-        ],
-        maxTokens: task === "answer" ? 500 : 800,
-      });
-      citations = hits.length ? this.toCitations(output, hits) : [];
+      yield { type: "delta", text: ABSTAIN_TEXT };
+      const result = await finish({ text: ABSTAIN_TEXT, citations: [], mode: "abstained", lowConfidence: true, grounding: null });
+      yield { type: "done", result };
+      return result;
     }
 
-    const latencyMs = Date.now() - started;
-    await this.opts.store.logQuestion(truncate(text, 500), `${channel}:${task}`, latencyMs).catch(() => undefined);
-    return { text: output, citations, lowConfidence, model: this.modelName, latencyMs };
+    yield {
+      type: "sources",
+      sources: hits.map(
+        (h, i): SourcePreview => ({
+          n: i + 1,
+          documentId: h.documentId,
+          title: h.title,
+          url: h.url,
+          sourceType: h.sourceType,
+          section: cleanSection(h.title, h.section),
+          score: round(h.score),
+        }),
+      ),
+    };
+
+    const req: GenerateRequest = {
+      task,
+      question: text,
+      sources: hits,
+      system: task === "answer" ? ANSWER_SYSTEM : DRAFT_SYSTEM,
+      messages: [{ role: "user", content: task === "answer" ? answerUserMessage(text, hits) : draftUserMessage(text, hits) }],
+      maxTokens: task === "answer" ? 500 : 800,
+    };
+    let output = "";
+    for await (const chunk of llmStream(this.opts.llm, req, opts.signal)) {
+      if (chunk.type === "text" && chunk.text) {
+        output += chunk.text;
+        yield { type: "delta", text: chunk.text };
+      } else if (chunk.type === "status") {
+        yield { type: "status", stage: chunk.stage, message: chunk.message };
+      }
+    }
+    output = output.trim();
+
+    const declined = task === "answer" && output.startsWith(ABSTAIN_TEXT.slice(0, 30)) && !extractCitationNumbers(output).length;
+    const result = await finish(
+      declined || !hits.length
+        ? { text: output, citations: [], mode: "abstained", lowConfidence: true, grounding: null }
+        : { text: output, ...groundAnswer(output, hits, task === "answer" ? text : undefined), mode: "generated", lowConfidence: false },
+    );
+    yield { type: "done", result };
+    return result;
+  }
+
+  private async collect(gen: AsyncGenerator<StreamEvent, AssistantResult>): Promise<AssistantResult> {
+    for (;;) {
+      const next = await gen.next();
+      if (next.done) return next.value;
+    }
   }
 
   ask(question: string, channel = "api"): Promise<AssistantResult> {
-    return this.run("answer", question, channel);
+    return this.collect(this.stream("answer", question, { channel }));
   }
 
   draftReply(ticket: string, channel = "api"): Promise<AssistantResult> {
-    return this.run("draft", ticket, channel);
+    return this.collect(this.stream("draft", ticket, { channel }));
   }
 }

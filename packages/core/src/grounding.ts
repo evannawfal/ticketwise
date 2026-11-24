@@ -25,14 +25,21 @@ export function contentTerms(text: string): Set<string> {
  * Share of a claim's content words that appear in the evidence, 0..1.
  * A lexical proxy for "is this claim backed by that passage". Numbers count as
  * words, so "5 days" is not supported by a passage that says "7 days".
+ *
+ * Words the claim repeats from the question ("the maximum attachment size is
+ * 10 MB") aren't something the passage has to prove, so when a question is
+ * given only the words the answer adds are checked.
  */
-export function supportScore(claim: string, evidence: string): number {
-  const c = contentTerms(claim);
-  if (!c.size) return 0;
+export function supportScore(claim: string, evidence: string, question?: string): number {
+  const all = contentTerms(claim);
+  if (!all.size) return 0;
+  const asked = question ? contentTerms(question) : new Set<string>();
+  const added = [...all].filter((t) => !asked.has(t));
+  const terms = added.length ? added : [...all];
   const e = contentTerms(evidence);
   let hit = 0;
-  for (const t of c) if (e.has(t)) hit++;
-  return hit / c.size;
+  for (const t of terms) if (e.has(t)) hit++;
+  return hit / terms.length;
 }
 
 /**

@@ -145,7 +145,7 @@ export function gradeCase(c: BenchmarkCase, r: GradableResult, ctx: GradeContext
   const claims = splitClaims(r.text);
   let grounded = 0;
   for (const claim of claims) {
-    const best = Math.max(0, ...claim.cites.flatMap((n) => (evidence.get(n) ?? []).map((e) => supportScore(claim.text, e))));
+    const best = Math.max(0, ...claim.cites.flatMap((n) => (evidence.get(n) ?? []).map((e) => supportScore(claim.text, e, c.question))));
     if (claim.cites.some((n) => byN.has(n)) && best >= SUPPORT_THRESHOLD) grounded++;
   }
   const groundedRate = claims.length ? grounded / claims.length : 0;
