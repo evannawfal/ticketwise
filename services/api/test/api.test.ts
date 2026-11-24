@@ -7,11 +7,12 @@ import {
   QueueFullError,
   QueueTimeoutError,
   SupportAssistant,
+  type StreamEvent,
 } from "@ticketwise/core";
 import { PgVectorStore, createPool, migrate } from "@ticketwise/core/pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseEmbeddingDim, parseLimits, parseMinScore } from "../src/config.js";
-import { createRouter, describeError, type HttpRequest } from "../src/http.js";
+import { createRouter, createStreamHandler, describeError, type HttpRequest } from "../src/http.js";
 import { parseSlackRequest, runSlackJob, verifySlackSignature } from "../src/slack.js";
 import { sampleDocs } from "../../../packages/core/test/helpers.js";
 
@@ -85,6 +86,93 @@ describe("HTTP API", () => {
     expect((await handle(req("DELETE", `/documents/${id}`))).statusCode).toBe(404);
     const list = JSON.parse((await handle(req("GET", "/documents"))).body);
     expect(list.documents).toHaveLength(1);
+  });
+});
+
+describe("streaming endpoint", () => {
+  async function open(body: unknown, path = "/ask/stream", token: string | null = TOKEN) {
+    const { assistant } = makeRouter();
+    for (const d of sampleDocs()) await assistant.ingest(d);
+    const stream = createStreamHandler({ assistant, adminToken: TOKEN, allowedOrigin: "*" });
+    return stream(req("POST", path, body, token));
+  }
+  async function events(res: Awaited<ReturnType<typeof open>>): Promise<StreamEvent[]> {
+    expect(typeof res.body).not.toBe("string");
+    let raw = "";
+    for await (const chunk of res.body as AsyncIterable<string>) raw += chunk;
+    return raw
+      .split("\n\n")
+      .filter(Boolean)
+      .map((e) => JSON.parse(e.replace(/^data: /, "")) as StreamEvent);
+  }
+
+  it("streams sources, text and a final result as server-sent events", async () => {
+    const res = await open({ question: "How long does a refund take to show up?" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+    const evs = await events(res);
+    expect(evs[0].type).toBe("sources");
+    const done = evs.at(-1) as Extract<StreamEvent, { type: "done" }>;
+    expect(done.type).toBe("done");
+    expect(done.result.citations[0].quotes.length).toBeGreaterThan(0);
+  });
+
+  it("streams drafts too", async () => {
+    const evs = await events(await open({ ticket: "Our workspace went read only" }, "/draft/stream"));
+    expect((evs.at(-1) as Extract<StreamEvent, { type: "done" }>).result.text).toMatch(/^Hi there,/);
+  });
+
+  it("rejects bad requests with a status code before the stream opens", async () => {
+    expect((await open({ question: "x" }, "/ask/stream", "wrong-token-123456")).statusCode).toBe(401);
+    expect((await open({ question: "   " })).statusCode).toBe(400);
+    expect((await open({ question: "hi", mode: "sometimes" })).statusCode).toBe(400);
+    expect((await open({ question: "hi" }, "/nope/stream")).statusCode).toBe(404);
+  });
+
+  it("reports a failure mid-stream as an error event", async () => {
+    const store = new MemoryStore();
+    const assistant = new SupportAssistant({
+      store,
+      embeddings: new LocalHashEmbeddings(),
+      minScore: 0.12,
+      llm: { name: "broken", generate: async () => { throw new ProviderError("upstream 500", 500); } },
+    });
+    for (const d of sampleDocs()) await assistant.ingest(d);
+    const res = await createStreamHandler({ assistant, adminToken: TOKEN, allowedOrigin: "*" })(
+      req("POST", "/ask/stream", { question: "How long does a refund take?" }),
+    );
+    const evs = await events(res);
+    expect(evs.at(-1)).toEqual({ type: "error", status: 502, message: "The model provider returned an error. Try again in a moment." });
+  });
+});
+
+describe("approved answers API", () => {
+  it("creates, matches, edits and deletes approved answers", async () => {
+    const { handle, assistant } = makeRouter();
+    for (const d of sampleDocs()) await assistant.ingest(d);
+    const answer = "Yes, within 14 days.  Exactly like this.";
+    const created = await handle(req("POST", "/approved", { question: "Can I get a refund on an annual plan?", answer, sources: [{ title: "Refund policy", url: "https://x.example/r" }] }));
+    expect(created.statusCode).toBe(201);
+    const id = JSON.parse(created.body).approved.id;
+
+    const asked = JSON.parse((await handle(req("POST", "/ask", { question: "Can I get a refund on my annual plan?" }))).body);
+    expect(asked).toMatchObject({ mode: "approved", text: answer, approved: { id } });
+    const off = JSON.parse((await handle(req("POST", "/ask", { question: "Can I get a refund on my annual plan?", mode: "off" }))).body);
+    expect(off.mode).toBe("generated");
+
+    const edited = await handle(req("PUT", `/approved/${id}`, { question: "Can I get a refund on an annual plan?", answer: "Changed." }));
+    expect(JSON.parse(edited.body).approved.answer).toBe("Changed.");
+    expect(JSON.parse((await handle(req("GET", "/approved"))).body).approved).toHaveLength(1);
+    expect((await handle(req("DELETE", `/approved/${id}`))).statusCode).toBe(200);
+    expect((await handle(req("DELETE", `/approved/${id}`))).statusCode).toBe(404);
+  });
+
+  it("validates approved answers", async () => {
+    const { handle } = makeRouter();
+    expect((await handle(req("POST", "/approved", { question: "q" }))).statusCode).toBe(400);
+    expect((await handle(req("POST", "/approved", { question: "q", answer: "a", sources: [{ title: "t", url: "ftp://x" }] }))).statusCode).toBe(400);
+    expect((await handle(req("POST", "/approved", { question: "q", answer: "a", sources: "nope" }))).statusCode).toBe(400);
+    expect((await handle(req("PUT", "/approved/missing", { question: "q", answer: "a" }))).statusCode).toBe(404);
   });
 });
 

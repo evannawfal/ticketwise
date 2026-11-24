@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { migrate } from "@ticketwise/core/pg";
 import { getApp } from "./config.js";
-import { createRouter } from "./http.js";
+import { STREAM_PATHS, createRouter, createStreamHandler } from "./http.js";
 import { parseSlackRequest, runSlackJob, verifySlackSignature } from "./slack.js";
 
 /**
@@ -37,12 +37,14 @@ function readBody(req: IncomingMessage): Promise<string> {
 const port = Number(process.env.PORT ?? 8787);
 const app = await getApp();
 await migrate(app.pool, app.config.embeddingDim);
-const router = createRouter({
+const deps = {
   assistant: app.assistant,
   store: app.store,
   adminToken: app.config.adminToken,
   allowedOrigin: app.config.allowedOrigin,
-});
+};
+const router = createRouter(deps);
+const openStream = createStreamHandler(deps);
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -86,8 +88,28 @@ createServer(async (req, res) => {
     return;
   }
 
+  if (STREAM_PATHS.includes(url.pathname.replace(/\/+$/, ""))) {
+    // Stop the model call if the browser goes away mid-answer.
+    const ac = new AbortController();
+    res.on("close", () => ac.abort(new Error("client disconnected")));
+    const out = await openStream({ method: req.method ?? "GET", path: url.pathname, headers, body }, ac.signal);
+    res.writeHead(out.statusCode, out.headers);
+    if (typeof out.body === "string") {
+      res.end(out.body);
+      return;
+    }
+    for await (const event of out.body) {
+      if (ac.signal.aborted) break;
+      res.write(event);
+    }
+    res.end();
+    return;
+  }
+
   const out = await router({ method: req.method ?? "GET", path: url.pathname, headers, body });
   res.writeHead(out.statusCode, out.headers).end(out.body);
 }).listen(port, () => {
+  const l = app.config.limits;
   console.log(`Ticketwise API on http://localhost:${port}  (llm=${app.config.llmProvider}, embeddings=${app.config.embeddingProvider})`);
+  console.log(`Model calls: ${l.maxConcurrent} at once, ${l.requestsPerMinute} req/min, ${l.tokensPerMinute} tokens/min, ${l.maxRetries} retries${l.sharedBudget ? " (shared budget in Postgres)" : ""}`);
 });

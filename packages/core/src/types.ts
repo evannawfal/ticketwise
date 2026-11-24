@@ -149,7 +149,9 @@ export type StreamEvent =
   | { type: "sources"; sources: SourcePreview[] }
   | { type: "status"; stage: "queued" | "retrying"; message: string }
   | { type: "delta"; text: string }
-  | { type: "done"; result: AssistantResult };
+  | { type: "done"; result: AssistantResult }
+  /** Sent by the HTTP layer if something fails after the stream has started. */
+  | { type: "error"; message: string; status: number };
 
 export interface Stats {
   documents: number;

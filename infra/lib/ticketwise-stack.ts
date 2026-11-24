@@ -7,7 +7,7 @@ import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as iam from "aws-cdk-lib/aws-iam";
-import { Architecture, Runtime } from "aws-cdk-lib/aws-lambda";
+import { Architecture, FunctionUrlAuthType, InvokeMode, Runtime } from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction, OutputFormat, type NodejsFunctionProps } from "aws-cdk-lib/aws-lambda-nodejs";
 import { RetentionDays } from "aws-cdk-lib/aws-logs";
@@ -68,6 +68,11 @@ export class TicketwiseStack extends Stack {
       SLACK_QUEUE_URL: queue.queueUrl,
       ALLOWED_ORIGIN: adminUrl,
       NODE_OPTIONS: "--enable-source-maps",
+      // Every container draws model calls from one requests/tokens-per-minute budget kept in Postgres.
+      LLM_SHARED_BUDGET: "1",
+      // Each container serves one request at a time; the shared budget is what spreads load.
+      LLM_MAX_CONCURRENT: "1",
+      LLM_QUEUE_TIMEOUT_MS: "20000",
     };
     if (props.bedrockModelId) environment.BEDROCK_MODEL_ID = props.bedrockModelId;
 
@@ -95,8 +100,9 @@ export class TicketwiseStack extends Stack {
     const slackFn = fn("SlackFn", "slack.ts", { memorySize: 256, timeout: Duration.seconds(5) });
     const workerFn = fn("WorkerFn", "worker.ts", { timeout: Duration.seconds(60) });
     const migrateFn = fn("MigrateFn", "migrate.ts", { timeout: Duration.seconds(60) });
+    const streamFn = fn("StreamFn", "stream.ts", { timeout: Duration.seconds(90) });
 
-    for (const f of [apiFn, slackFn, workerFn, migrateFn]) secret.grantRead(f);
+    for (const f of [apiFn, slackFn, workerFn, migrateFn, streamFn]) secret.grantRead(f);
     queue.grantSendMessages(slackFn);
     workerFn.addEventSource(new SqsEventSource(queue, { batchSize: 1, reportBatchItemFailures: true }));
 
@@ -108,7 +114,10 @@ export class TicketwiseStack extends Stack {
           `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
         ],
       });
-      for (const f of [apiFn, workerFn]) f.addToRolePolicy(bedrock);
+      for (const f of [apiFn, workerFn, streamFn]) {
+        f.addToRolePolicy(bedrock);
+        f.addToRolePolicy(new iam.PolicyStatement({ actions: ["bedrock:InvokeModelWithResponseStream"], resources: bedrock.resources }));
+      }
     }
 
     // Create tables after every deploy (idempotent CREATE ... IF NOT EXISTS).
@@ -120,18 +129,26 @@ export class TicketwiseStack extends Stack {
     httpApi.addRoutes({ path: "/{proxy+}", methods: [HttpMethod.ANY], integration: new HttpLambdaIntegration("ApiInt", apiFn) });
     const apiUrl = httpApi.apiEndpoint;
 
+    // API Gateway HTTP APIs buffer responses, so streamed answers come from a function URL.
+    // Auth is the same admin token, checked in the handler; CORS is handled there too.
+    const streamUrl = streamFn.addFunctionUrl({ authType: FunctionUrlAuthType.NONE, invokeMode: InvokeMode.RESPONSE_STREAM });
+
     // ---------- Upload admin build + runtime config ----------
     const adminOut = join(root, "apps/admin/out");
     if (existsSync(adminOut)) {
       new s3deploy.BucketDeployment(this, "AdminDeploy", {
         destinationBucket: siteBucket,
         distribution,
-        sources: [s3deploy.Source.asset(adminOut), s3deploy.Source.jsonData("config.json", { apiUrl })],
+        sources: [
+          s3deploy.Source.asset(adminOut),
+          s3deploy.Source.jsonData("config.json", { apiUrl, streamUrl: streamUrl.url }),
+        ],
       });
     }
 
     new CfnOutput(this, "AdminUrl", { value: adminUrl });
     new CfnOutput(this, "ApiUrl", { value: apiUrl });
+    new CfnOutput(this, "StreamUrl", { value: streamUrl.url, description: "Streams /ask/stream and /draft/stream" });
     new CfnOutput(this, "SlackRequestUrl", { value: `${apiUrl}/slack/events`, description: "Use for Slash Commands and Event Subscriptions" });
     new CfnOutput(this, "DeadLetterQueue", { value: queueDlq.queueName });
   }
