@@ -8,7 +8,10 @@ import {
   RequestQueue,
   ResilientEmbeddings,
   ResilientLlm,
+  APPROVED_MODES,
   SupportAssistant,
+  tuningFor,
+  type ApprovedMode,
   type EmbeddingProvider,
   type LlmProvider,
 } from "@ticketwise/core";
@@ -28,6 +31,8 @@ export interface AppConfig {
   bedrockModelId?: string;
   openaiModel?: string;
   minScore?: number;
+  approvedMode: ApprovedMode;
+  approvedThreshold?: number;
   allowedOrigin: string;
   slackQueueUrl?: string;
   limits: LimitsConfig;
@@ -102,6 +107,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<AppCon
       bedrockModelId: values.BEDROCK_MODEL_ID || undefined,
       openaiModel: values.OPENAI_MODEL || undefined,
       minScore: parseMinScore(values.MIN_SCORE),
+      approvedMode: parseApprovedMode(values.APPROVED_MODE),
+      approvedThreshold: parseMinScore(values.APPROVED_THRESHOLD, "APPROVED_THRESHOLD"),
       allowedOrigin: values.ALLOWED_ORIGIN || "*",
       slackQueueUrl: values.SLACK_QUEUE_URL || undefined,
       limits: parseLimits(values),
@@ -123,11 +130,17 @@ export function parseEmbeddingDim(raw: string | undefined, provider: string | un
   return dim;
 }
 
-export function parseMinScore(raw: string | undefined): number | undefined {
+export function parseMinScore(raw: string | undefined, name = "MIN_SCORE"): number | undefined {
   if (raw === undefined || raw === "") return undefined;
   const v = Number(raw);
-  if (!Number.isFinite(v) || v < 0 || v > 1) throw new Error(`MIN_SCORE must be between 0 and 1 (got "${raw}")`);
+  if (!Number.isFinite(v) || v < 0 || v > 1) throw new Error(`${name} must be between 0 and 1 (got "${raw}")`);
   return v;
+}
+
+export function parseApprovedMode(raw: string | undefined): ApprovedMode {
+  const v = (raw || "prefer").toLowerCase();
+  if (!(APPROVED_MODES as readonly string[]).includes(v)) throw new Error(`APPROVED_MODE must be off, prefer or only (got "${raw}")`);
+  return v as ApprovedMode;
 }
 
 /** Only for tests. */
@@ -176,9 +189,8 @@ export function getApp(): Promise<App> {
     const pool = createPool(config.databaseUrl);
     const store = new PgVectorStore(pool);
     // Neural embeddings score related text higher than hashed keywords do,
-    // so the relevance cutoff depends on the embedding provider.
-    const local = config.embeddingProvider === "local";
-    const minScore = config.minScore ?? (local ? 0.12 : 0.3);
+    // so the cutoffs depend on the embedding provider.
+    const tuning = tuningFor(config.embeddingProvider === "local" ? "local" : "neural");
     const { limits } = config;
     const budgetLimits = { requestsPerMinute: limits.requestsPerMinute, tokensPerMinute: limits.tokensPerMinute };
     const queue = new RequestQueue({
@@ -192,8 +204,10 @@ export function getApp(): Promise<App> {
       store,
       embeddings: new ResilientEmbeddings(makeEmbeddings(config), retry),
       llm: new ResilientLlm(makeLlm(config), { queue, retry }),
-      minScore,
-      minCoverage: local ? 0.3 : 0.1,
+      ...tuning,
+      minScore: config.minScore ?? tuning.minScore,
+      approvedMode: config.approvedMode,
+      approvedThreshold: config.approvedThreshold ?? tuning.approvedThreshold,
     });
     return { config, pool, store, assistant, queue };
   })();

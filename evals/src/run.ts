@@ -8,6 +8,7 @@ import {
   OpenAiEmbeddings,
   OpenAiLlm,
   SupportAssistant,
+  tuningFor,
 } from "@ticketwise/core";
 import { loadApprovedSeeds, loadCorpus, repoRoot } from "./corpus.js";
 import { gradeCase, summarize, type BenchmarkCase, type CaseGrade } from "./grade.js";
@@ -40,16 +41,14 @@ function build() {
       store,
       embeddings: new OpenAiEmbeddings({ apiKey }, 512),
       llm: new OpenAiLlm({ apiKey }, process.env.OPENAI_MODEL),
-      minScore: 0.3,
-      minCoverage: 0.1,
+      ...tuningFor("neural"),
     });
   }
   return new SupportAssistant({
     store,
     embeddings: new LocalHashEmbeddings(512),
     llm: new ExtractiveLlm(),
-    minScore: 0.12,
-    minCoverage: 0.3,
+    ...tuningFor("local"),
   });
 }
 
@@ -68,6 +67,7 @@ const corpusDocs = loadCorpus();
 for (const d of corpusDocs) await assistant.ingest(d);
 const corpus = new Map(corpusDocs.map((d) => [d.title, d.content]));
 const approvedSeeds = loadApprovedSeeds();
+for (const a of approvedSeeds) await assistant.approve(a);
 const approved = new Map(approvedSeeds.map((a) => [a.id, a.answer]));
 
 const grades: CaseGrade[] = [];

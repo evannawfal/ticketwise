@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "run": "tsx src/run.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "calibrate": "tsx src/calibrate.ts"
   },
   "dependencies": {
     "@ticketwise/core": "1.0.0"

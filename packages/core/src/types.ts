@@ -74,13 +74,51 @@ export interface Grounding {
   total: number;
 }
 
-/** generated: written by the model from sources. abstained: nothing relevant, so no answer. */
-export type AnswerMode = "generated" | "abstained";
+/**
+ * generated: written by the model from sources.
+ * approved: a stored approved answer, returned word for word.
+ * abstained: nothing relevant (or, in approved-only mode, nothing approved), so no answer.
+ */
+export type AnswerMode = "generated" | "approved" | "abstained";
+
+/**
+ * off: always generate. prefer: return a matching approved answer if there is
+ * one, otherwise generate. only: return approved answers or nothing.
+ */
+export type ApprovedMode = "off" | "prefer" | "only";
+
+export interface ApprovedSource {
+  title: string;
+  url?: string | null;
+}
+
+export interface ApprovedAnswerInput {
+  question: string;
+  answer: string;
+  sources?: ApprovedSource[];
+}
+
+export interface ApprovedAnswer {
+  id: string;
+  question: string;
+  /** Returned exactly as stored: never trimmed, reformatted or sent through a model. */
+  answer: string;
+  sources: ApprovedSource[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApprovedHit extends ApprovedAnswer {
+  /** Cosine similarity between the questions' embeddings. */
+  score: number;
+}
 
 export interface AssistantResult {
   text: string;
   citations: Citation[];
   mode: AnswerMode;
+  /** Set when mode is "approved": which stored answer was returned and how closely the question matched. */
+  approved?: { id: string; question: string; match: number; sources: ApprovedSource[] };
   /** True when the retrieved sources were too weak to answer confidently. */
   lowConfidence: boolean;
   /** Per-sentence check that each claim is backed by a quoted passage. Null when nothing was generated. */
@@ -118,6 +156,7 @@ export interface Stats {
   tickets: number;
   chunks: number;
   questionsLast7Days: number;
+  approvedAnswers: number;
 }
 
 export interface VectorStore {
@@ -127,6 +166,12 @@ export interface VectorStore {
   search(embedding: number[], k: number): Promise<SearchHit[]>;
   logQuestion(question: string, channel: string, latencyMs: number): Promise<void>;
   stats(): Promise<Stats>;
+
+  addApproved(input: ApprovedAnswerInput & { id?: string }, embedding: number[]): Promise<ApprovedAnswer>;
+  updateApproved(id: string, input: ApprovedAnswerInput, embedding: number[]): Promise<ApprovedAnswer | null>;
+  listApproved(): Promise<ApprovedAnswer[]>;
+  deleteApproved(id: string): Promise<boolean>;
+  searchApproved(embedding: number[], k: number): Promise<ApprovedHit[]>;
 }
 
 export interface EmbeddingProvider {

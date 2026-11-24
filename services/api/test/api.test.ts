@@ -189,7 +189,7 @@ describe.skipIf(!dbUrl)("PgVectorStore (real Postgres)", () => {
   const assistant = new SupportAssistant({ store, embeddings: new LocalHashEmbeddings(), llm: new ExtractiveLlm(), minScore: 0.12 });
 
   beforeAll(async () => {
-    await pool.query("DROP TABLE IF EXISTS chunks, documents, questions CASCADE");
+    await pool.query("DROP TABLE IF EXISTS chunks, documents, questions, approved_answers CASCADE");
     await migrate(pool, 512);
     await migrate(pool, 512); // idempotent
     for (const d of sampleDocs()) await assistant.ingest(d);
@@ -216,6 +216,20 @@ describe.skipIf(!dbUrl)("PgVectorStore (real Postgres)", () => {
     const a = (await assistant.retrieve(q)).map((h) => h.title);
     const b = (await memAssistant.retrieve(q)).map((h) => h.title);
     expect(a[0]).toBe(b[0]);
+  });
+
+  it("stores approved answers and returns them word for word", async () => {
+    const answer = "Yes — for 30 days.\n\nAfter that it's gone.  ";
+    const saved = await assistant.approve({ id: "restore", question: "Can a deleted workspace be restored?", answer, sources: [{ title: "Members" }] });
+    expect(saved).toMatchObject({ id: "restore", sources: [{ title: "Members", url: null }] });
+    const res = await assistant.ask("Can a deleted workspace be restored?");
+    expect(res).toMatchObject({ mode: "approved", text: answer, approved: { id: "restore" } });
+    const updated = await assistant.updateApproved("restore", { question: "Can a deleted workspace be restored?", answer: "No." });
+    expect(updated!.answer).toBe("No.");
+    expect((await store.listApproved()).map((a) => a.id)).toEqual(["restore"]);
+    expect((await store.stats()).approvedAnswers).toBe(1);
+    expect(await store.deleteApproved("restore")).toBe(true);
+    expect(await store.deleteApproved("restore")).toBe(false);
   });
 
   it("cascades chunk deletes", async () => {

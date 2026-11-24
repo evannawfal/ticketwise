@@ -79,3 +79,24 @@ export function isVerbatim(quote: string, source: string): boolean {
   const q = normalizeForMatch(quote);
   return q.length > 0 && normalizeForMatch(source).includes(q);
 }
+
+/**
+ * How closely a user's question matches an approved answer's question, 0..1:
+ * half embedding similarity, half word overlap.
+ *
+ * The word overlap mostly asks "does the user's question contain everything
+ * the approved question asks?", with a light penalty for extra words. So
+ * "pay by invoice instead of card" still matches "pay by invoice", while
+ * "refund on a monthly plan" does not match "refund on an annual plan", a
+ * pair that embeddings alone rate as nearly the same question.
+ */
+export function approvedMatchScore(question: string, approvedQuestion: string, vectorScore: number): number {
+  const asked = contentTerms(question);
+  const approved = contentTerms(approvedQuestion);
+  if (!asked.size || !approved.size) return 0;
+  let shared = 0;
+  for (const t of asked) if (approved.has(t)) shared++;
+  const covered = shared / approved.size;
+  const extra = shared / asked.size;
+  return 0.5 * vectorScore + 0.5 * covered * extra ** 0.25;
+}

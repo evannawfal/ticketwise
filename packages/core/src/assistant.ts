@@ -1,9 +1,13 @@
 import { chunkMarkdown, embeddingText } from "./chunk.js";
-import { splitClaims } from "./grounding.js";
-import { ABSTAIN_TEXT, ANSWER_SYSTEM, DRAFT_SYSTEM, answerUserMessage, draftUserMessage } from "./prompts.js";
+import { approvedMatchScore, splitClaims } from "./grounding.js";
+import { ABSTAIN_TEXT, ANSWER_SYSTEM, DRAFT_SYSTEM, NO_APPROVED_TEXT, answerUserMessage, draftUserMessage } from "./prompts.js";
 import { bestQuote } from "./quotes.js";
 import { tokenize, truncate } from "./text.js";
 import type {
+  ApprovedAnswer,
+  ApprovedAnswerInput,
+  ApprovedHit,
+  ApprovedMode,
   AssistantResult,
   Citation,
   ClaimCheck,
@@ -37,16 +41,36 @@ export interface AssistantOptions {
    * lower for neural embeddings that already handle paraphrases.
    */
   minCoverage?: number;
+  /** Default for questions that don't say. */
+  approvedMode?: ApprovedMode;
+  /** approvedMatchScore needed to return an approved answer. Calibrated on the benchmark. */
+  approvedThreshold?: number;
 }
 
 export interface RunOptions {
   /** Where the question came from, for usage stats ("web", "slack", "eval"...). */
   channel?: string;
   signal?: AbortSignal;
+  /** Overrides the assistant's default for this question. Drafts always generate. */
+  approvedMode?: ApprovedMode;
 }
 
 const MAX_DOC_CHARS = 200_000;
 const MAX_INPUT_CHARS = 8000;
+const MAX_APPROVED_QUESTION = 1000;
+const MAX_APPROVED_ANSWER = 8000;
+export const APPROVED_MODES: readonly ApprovedMode[] = ["off", "prefer", "only"];
+
+/**
+ * Cutoffs that suit each kind of embedding. Hashed keyword vectors score
+ * related text lower than neural ones do, so every threshold moves with them.
+ * The approved-answer thresholds come from `npm run calibrate -w @ticketwise/evals`.
+ */
+export function tuningFor(embeddings: "local" | "neural"): Pick<AssistantOptions, "minScore" | "minCoverage" | "approvedThreshold"> {
+  return embeddings === "local"
+    ? { minScore: 0.12, minCoverage: 0.3, approvedThreshold: 0.7 }
+    : { minScore: 0.3, minCoverage: 0.1, approvedThreshold: 0.83 };
+}
 /** A claim is grounded when a quoted passage from a source it cites covers this share of its words. */
 export const GROUNDED_SUPPORT = 0.6;
 
@@ -156,12 +180,52 @@ export class SupportAssistant {
   readonly minScore: number;
   readonly maxPerDocument: number;
   readonly minCoverage: number;
+  readonly approvedMode: ApprovedMode;
+  readonly approvedThreshold: number;
 
   constructor(private opts: AssistantOptions) {
     this.topK = opts.topK ?? 6;
     this.minScore = opts.minScore ?? 0.2;
     this.maxPerDocument = opts.maxPerDocument ?? 2;
     this.minCoverage = opts.minCoverage ?? 0.3;
+    this.approvedMode = opts.approvedMode ?? "prefer";
+    this.approvedThreshold = opts.approvedThreshold ?? 0.6;
+  }
+
+  private validateApproved(input: ApprovedAnswerInput): ApprovedAnswerInput {
+    const question = input.question?.trim();
+    if (!question) throw new Error("question is required");
+    if (!input.answer?.trim()) throw new Error("answer is required");
+    if (question.length > MAX_APPROVED_QUESTION) throw new Error(`question is too long (max ${MAX_APPROVED_QUESTION} characters)`);
+    if (input.answer.length > MAX_APPROVED_ANSWER) throw new Error(`answer is too long (max ${MAX_APPROVED_ANSWER} characters)`);
+    const sources = (input.sources ?? []).filter((s) => s?.title?.trim()).map((s) => ({ title: s.title.trim(), url: s.url || null }));
+    // The answer is stored exactly as given, whitespace and all: it is returned word for word.
+    return { question, answer: input.answer, sources };
+  }
+
+  /** Save an answer to be returned word for word whenever a question matches `question`. */
+  async approve(input: ApprovedAnswerInput & { id?: string }): Promise<ApprovedAnswer> {
+    const clean = this.validateApproved(input);
+    const [vector] = await this.opts.embeddings.embed([clean.question], "query");
+    return this.opts.store.addApproved({ ...clean, id: input.id }, vector);
+  }
+
+  async updateApproved(id: string, input: ApprovedAnswerInput): Promise<ApprovedAnswer | null> {
+    const clean = this.validateApproved(input);
+    const [vector] = await this.opts.embeddings.embed([clean.question], "query");
+    return this.opts.store.updateApproved(id, clean, vector);
+  }
+
+  /** The best approved answer for a question, if it clears the threshold. */
+  async matchApproved(question: string, vector?: number[]): Promise<(ApprovedHit & { match: number }) | null> {
+    const v = vector ?? (await this.opts.embeddings.embed([question], "query"))[0];
+    const candidates = await this.opts.store.searchApproved(v, 5);
+    let best: (ApprovedHit & { match: number }) | null = null;
+    for (const c of candidates) {
+      const match = approvedMatchScore(question, c.question, c.score);
+      if (match >= this.approvedThreshold && (!best || match > best.match)) best = { ...c, match: round(match) };
+    }
+    return best;
   }
 
   get modelName(): string {
@@ -238,14 +302,47 @@ export class SupportAssistant {
     if (!text) throw new Error(task === "answer" ? "question is required" : "ticket text is required");
     if (text.length > MAX_INPUT_CHARS) throw new Error(`input is too long (max ${MAX_INPUT_CHARS} characters)`);
 
-    const hits = await this.retrieve(text);
-    const finish = async (r: Omit<AssistantResult, "latencyMs" | "model">): Promise<AssistantResult> => {
+    const finish = async (r: Omit<AssistantResult, "latencyMs" | "model">, model = this.modelName): Promise<AssistantResult> => {
       const latencyMs = Date.now() - started;
       await this.opts.store
         .logQuestion(truncate(text, 500), `${opts.channel ?? "api"}:${task}`, latencyMs)
         .catch(() => undefined);
-      return { ...r, model: this.modelName, latencyMs };
+      return { ...r, model, latencyMs };
     };
+
+    const [vector] = await this.opts.embeddings.embed([text], "query");
+    const approvedMode = task === "answer" ? (opts.approvedMode ?? this.approvedMode) : "off";
+    if (approvedMode !== "off") {
+      const match = await this.matchApproved(text, vector);
+      if (match) {
+        // Word for word: the stored text goes out untouched, with no model call.
+        yield { type: "delta", text: match.answer };
+        const result = await finish(
+          {
+            text: match.answer,
+            citations: [],
+            mode: "approved",
+            approved: { id: match.id, question: match.question, match: match.match, sources: match.sources },
+            lowConfidence: false,
+            grounding: null,
+          },
+          "approved answer (no model call)",
+        );
+        yield { type: "done", result };
+        return result;
+      }
+      if (approvedMode === "only") {
+        yield { type: "delta", text: NO_APPROVED_TEXT };
+        const result = await finish(
+          { text: NO_APPROVED_TEXT, citations: [], mode: "abstained", lowConfidence: true, grounding: null },
+          "approved answers only",
+        );
+        yield { type: "done", result };
+        return result;
+      }
+    }
+
+    const hits = await this.retrieveWith(text, vector);
 
     if (!hits.length && task === "answer") {
       // Nothing relevant: skip the model call entirely. Saves money and avoids made-up answers.
@@ -321,8 +418,8 @@ export class SupportAssistant {
     }
   }
 
-  ask(question: string, channel = "api"): Promise<AssistantResult> {
-    return this.collect(this.stream("answer", question, { channel }));
+  ask(question: string, channel = "api", approvedMode?: ApprovedMode): Promise<AssistantResult> {
+    return this.collect(this.stream("answer", question, { channel, approvedMode }));
   }
 
   draftReply(ticket: string, channel = "api"): Promise<AssistantResult> {

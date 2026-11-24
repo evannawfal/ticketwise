@@ -13,6 +13,9 @@ export function formatSources(hits: SearchHit[]): string {
 /** The exact reply when the sources don't answer the question. Clients and the eval detect it. */
 export const ABSTAIN_TEXT = "I couldn't find this in the knowledge base. It may need a human agent.";
 
+/** The reply in approved-only mode when no approved answer matches. */
+export const NO_APPROVED_TEXT = "There's no approved answer for this question yet. It may need a human agent.";
+
 export const ANSWER_SYSTEM = `You are a support assistant for a software company. You answer questions from support agents and customers using ONLY the numbered sources provided.
 
 Rules:
