@@ -53,8 +53,8 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
  */
 export function renderScoreChart(runs: HistoryRun[]): string {
   const W = 760;
-  const H = 280;
-  const m = { top: 48, right: 64, bottom: 44, left: 44 };
+  const H = 300;
+  const m = { top: 70, right: 64, bottom: 40, left: 60 };
   const iw = W - m.left - m.right;
   const ih = H - m.top - m.bottom;
   const scores = runs.map((r) => r.summary.score);
@@ -112,8 +112,8 @@ export function renderScoreChart(runs: HistoryRun[]): string {
   .value { fill: var(--ink); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 </style>
 <rect class="bg" width="${W}" height="${H}" rx="8"/>
-<text class="title" x="${m.left - 28}" y="24">Grounding benchmark score</text>
-<text class="sub" x="${m.left - 28}" y="40">${runs.length} runs on main, ${esc(evalCount(runs))} questions each, out of 100</text>
+<text class="title" x="20" y="28">Grounding benchmark score</text>
+<text class="sub" x="20" y="46">${runs.length} runs on main, ${esc(evalCount(runs))} questions each, out of 100</text>
 ${grid}${xLabels}
 <path class="line" d="${path}"/>
 ${points}${lastLabel}
