@@ -1,11 +1,11 @@
 {
   "schema": 1,
   "benchmark": "Northpine grounding benchmark",
-  "runAt": "2026-11-25T01:13:42.480Z",
-  "commit": "8e1d6d39ccc3e92282dcc6635954ff2981fce4b8",
+  "runAt": "2026-11-25T02:55:47.804Z",
+  "commit": "ac49f641e9d9ec556efd4576306466efc5e7786a",
   "provider": "local",
   "model": "extractive (offline) + local-hash",
-  "durationMs": 118,
+  "durationMs": 66,
   "summary": {
     "score": 96.1,
     "cases": 30,

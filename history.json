@@ -1539,6 +1539,177 @@
           "score": 0.7
         }
       ]
+    },
+    {
+      "commit": "ac49f641e9d9ec556efd4576306466efc5e7786a",
+      "subject": "Production RAG: streamed answers with exact quotes, approved answers, request queue, eval gate (#1)",
+      "committedAt": "2026-11-24T19:55:22-07:00",
+      "runAt": "2026-11-25T02:55:47.804Z",
+      "model": "extractive (offline) + local-hash",
+      "summary": {
+        "score": 96.1,
+        "cases": 30,
+        "passed": 27,
+        "retrievalRecall": 100,
+        "factRecall": 85.7,
+        "groundedClaims": 100,
+        "citationPrecision": 87.9,
+        "quoteExactness": 100,
+        "abstainAccuracy": 100,
+        "approvedAccuracy": 100
+      },
+      "cases": [
+        {
+          "id": "refund-timing",
+          "pass": true,
+          "score": 0.925
+        },
+        {
+          "id": "backup-codes",
+          "pass": true,
+          "score": 0.925
+        },
+        {
+          "id": "api-rate-limit",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "guest-seats",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "team-monthly-price",
+          "pass": true,
+          "score": 0.95
+        },
+        {
+          "id": "failed-payment",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "invite-expiry",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "free-attachment-limit",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "calendar-sync-interval",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "export-link-expiry",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "sso-providers",
+          "pass": false,
+          "score": 0.7
+        },
+        {
+          "id": "refund-approval-limit",
+          "pass": false,
+          "score": 0.7
+        },
+        {
+          "id": "owner-left",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "offline-conflict",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "ios-version",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "downgrade-timing",
+          "pass": true,
+          "score": 0.925
+        },
+        {
+          "id": "board-something-wrong",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "webhook-retries",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "abstain-christmas",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "abstain-trivia",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "abstain-student-discount",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "abstain-hipaa",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "abstain-injection",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "approved-refund-annual",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "approved-invoice",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "approved-restore",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "approved-2fa",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "miss-refund-monthly",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "miss-delete-workspace",
+          "pass": true,
+          "score": 1
+        },
+        {
+          "id": "miss-payment-methods",
+          "pass": false,
+          "score": 0.7
+        }
+      ]
     }
   ]
 }
