@@ -81,6 +81,10 @@ describe("helpers", () => {
     expect(stem("refunds")).toBe("refund");
     expect(stem("refunded")).toBe("refund");
     expect(stem("policies")).toBe("policy");
+    expect(new Set(["expire", "expires", "expired"].map(stem)).size).toBe(1);
+    expect(stem("codes")).toBe(stem("code"));
+    expect(stem("files")).toBe(stem("file"));
+    expect(stem("invoices")).toBe(stem("invoice"));
   });
 
   it("drops section headings that repeat the title", () => {

@@ -10,6 +10,7 @@ const nextConfig = {
   env: {
     NEXT_PUBLIC_DEMO: process.env.NEXT_PUBLIC_DEMO || "",
     NEXT_PUBLIC_BASE_PATH: basePath,
+    NEXT_PUBLIC_EVAL_HISTORY_URL: process.env.NEXT_PUBLIC_EVAL_HISTORY_URL || "",
   },
 };
 

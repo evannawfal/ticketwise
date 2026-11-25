@@ -4,12 +4,19 @@ import {
   LocalHashEmbeddings,
   OpenAiEmbeddings,
   OpenAiLlm,
+  MemoryBudget,
+  RequestQueue,
+  ResilientEmbeddings,
+  ResilientLlm,
+  APPROVED_MODES,
   SupportAssistant,
+  tuningFor,
+  type ApprovedMode,
   type EmbeddingProvider,
   type LlmProvider,
 } from "@ticketwise/core";
 import { BedrockEmbeddings, BedrockLlm } from "@ticketwise/core/bedrock";
-import { PgVectorStore, createPool } from "@ticketwise/core/pg";
+import { PgBudget, PgVectorStore, createPool } from "@ticketwise/core/pg";
 import type pg from "pg";
 
 export interface AppConfig {
@@ -24,8 +31,42 @@ export interface AppConfig {
   bedrockModelId?: string;
   openaiModel?: string;
   minScore?: number;
+  approvedMode: ApprovedMode;
+  approvedThreshold?: number;
   allowedOrigin: string;
   slackQueueUrl?: string;
+  limits: LimitsConfig;
+}
+
+/** How model calls are queued and retried. See the README section "Many users at once". */
+export interface LimitsConfig {
+  maxConcurrent: number;
+  requestsPerMinute: number;
+  tokensPerMinute: number;
+  maxQueue: number;
+  queueTimeoutMs: number;
+  maxRetries: number;
+  /** Keep the budget in Postgres so every Lambda container shares one limit. */
+  sharedBudget: boolean;
+}
+
+export function parseLimits(env: Record<string, string | undefined>): LimitsConfig {
+  const num = (key: string, fallback: number, min: number) => {
+    const raw = env[key];
+    if (raw === undefined || raw === "") return fallback;
+    const v = Number(raw);
+    if (!Number.isInteger(v) || v < min) throw new Error(`${key} must be a whole number of at least ${min} (got "${raw}")`);
+    return v;
+  };
+  return {
+    maxConcurrent: num("LLM_MAX_CONCURRENT", 4, 1),
+    requestsPerMinute: num("LLM_REQUESTS_PER_MINUTE", 50, 1),
+    tokensPerMinute: num("LLM_TOKENS_PER_MINUTE", 100_000, 100),
+    maxQueue: num("LLM_MAX_QUEUE", 100, 0),
+    queueTimeoutMs: num("LLM_QUEUE_TIMEOUT_MS", 60_000, 1000),
+    maxRetries: num("LLM_MAX_RETRIES", 4, 0),
+    sharedBudget: env.LLM_SHARED_BUDGET === "1" || env.LLM_SHARED_BUDGET === "true",
+  };
 }
 
 const SECRET_KEYS = ["DATABASE_URL", "ADMIN_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_BOT_TOKEN", "OPENAI_API_KEY"] as const;
@@ -66,8 +107,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<AppCon
       bedrockModelId: values.BEDROCK_MODEL_ID || undefined,
       openaiModel: values.OPENAI_MODEL || undefined,
       minScore: parseMinScore(values.MIN_SCORE),
+      approvedMode: parseApprovedMode(values.APPROVED_MODE),
+      approvedThreshold: parseMinScore(values.APPROVED_THRESHOLD, "APPROVED_THRESHOLD"),
       allowedOrigin: values.ALLOWED_ORIGIN || "*",
       slackQueueUrl: values.SLACK_QUEUE_URL || undefined,
+      limits: parseLimits(values),
     };
   })();
   cachedConfig.catch(() => (cachedConfig = undefined));
@@ -86,11 +130,17 @@ export function parseEmbeddingDim(raw: string | undefined, provider: string | un
   return dim;
 }
 
-export function parseMinScore(raw: string | undefined): number | undefined {
+export function parseMinScore(raw: string | undefined, name = "MIN_SCORE"): number | undefined {
   if (raw === undefined || raw === "") return undefined;
   const v = Number(raw);
-  if (!Number.isFinite(v) || v < 0 || v > 1) throw new Error(`MIN_SCORE must be between 0 and 1 (got "${raw}")`);
+  if (!Number.isFinite(v) || v < 0 || v > 1) throw new Error(`${name} must be between 0 and 1 (got "${raw}")`);
   return v;
+}
+
+export function parseApprovedMode(raw: string | undefined): ApprovedMode {
+  const v = (raw || "prefer").toLowerCase();
+  if (!(APPROVED_MODES as readonly string[]).includes(v)) throw new Error(`APPROVED_MODE must be off, prefer or only (got "${raw}")`);
+  return v as ApprovedMode;
 }
 
 /** Only for tests. */
@@ -128,6 +178,7 @@ export interface App {
   pool: pg.Pool;
   store: PgVectorStore;
   assistant: SupportAssistant;
+  queue: RequestQueue;
 }
 
 let cachedApp: Promise<App> | undefined;
@@ -138,17 +189,27 @@ export function getApp(): Promise<App> {
     const pool = createPool(config.databaseUrl);
     const store = new PgVectorStore(pool);
     // Neural embeddings score related text higher than hashed keywords do,
-    // so the relevance cutoff depends on the embedding provider.
-    const local = config.embeddingProvider === "local";
-    const minScore = config.minScore ?? (local ? 0.12 : 0.3);
+    // so the cutoffs depend on the embedding provider.
+    const tuning = tuningFor(config.embeddingProvider === "local" ? "local" : "neural");
+    const { limits } = config;
+    const budgetLimits = { requestsPerMinute: limits.requestsPerMinute, tokensPerMinute: limits.tokensPerMinute };
+    const queue = new RequestQueue({
+      maxConcurrent: limits.maxConcurrent,
+      maxQueue: limits.maxQueue,
+      timeoutMs: limits.queueTimeoutMs,
+      budget: limits.sharedBudget ? new PgBudget(pool, budgetLimits) : new MemoryBudget(budgetLimits),
+    });
+    const retry = { maxRetries: limits.maxRetries };
     const assistant = new SupportAssistant({
       store,
-      embeddings: makeEmbeddings(config),
-      llm: makeLlm(config),
-      minScore,
-      minCoverage: local ? 0.3 : 0.1,
+      embeddings: new ResilientEmbeddings(makeEmbeddings(config), retry),
+      llm: new ResilientLlm(makeLlm(config), { queue, retry }),
+      ...tuning,
+      minScore: config.minScore ?? tuning.minScore,
+      approvedMode: config.approvedMode,
+      approvedThreshold: config.approvedThreshold ?? tuning.approvedThreshold,
     });
-    return { config, pool, store, assistant };
+    return { config, pool, store, assistant, queue };
   })();
   cachedApp.catch(() => (cachedApp = undefined));
   return cachedApp;

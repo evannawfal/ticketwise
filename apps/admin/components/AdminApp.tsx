@@ -1,34 +1,44 @@
 "use client";
 
-import type { AssistantResult, DocumentRecord, Stats } from "@ticketwise/core";
+import type { ApprovedAnswer, ApprovedMode, AssistantResult, DocumentRecord, SourcePreview, Stats, StreamEvent } from "@ticketwise/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiBackend, type Backend } from "@/lib/backend";
+import { ApiBackend, type Backend, type OnEvent } from "@/lib/backend";
 import { isDemo, loadDeployedConfig, loadSettings, saveSettings, type Settings } from "@/lib/settings";
-import { ResultMeta, RichText, Sources, useCiteFlash } from "./Answer";
-import { AskIcon, DocsIcon, DraftIcon, SettingsIcon } from "./icons";
+import { ApprovedSources, ApprovedText, GroundingNote, ResultMeta, RichText, SourcePreviews, Sources, useCiteFlash } from "./Answer";
+import { EvalsView } from "./Evals";
+import { ApprovedIcon, AskIcon, DocsIcon, DraftIcon, EvalsIcon, SettingsIcon } from "./icons";
 
-type Tab = "ask" | "draft" | "docs" | "settings";
+type Tab = "ask" | "draft" | "approved" | "docs" | "evals" | "settings";
 
 const TABS: { id: Tab; label: string; Icon: () => React.ReactElement }[] = [
   { id: "ask", label: "Ask", Icon: AskIcon },
   { id: "draft", label: "Draft reply", Icon: DraftIcon },
+  { id: "approved", label: "Approved answers", Icon: ApprovedIcon },
   { id: "docs", label: "Knowledge base", Icon: DocsIcon },
+  { id: "evals", label: "Evals", Icon: EvalsIcon },
   { id: "settings", label: "Settings", Icon: SettingsIcon },
 ];
 
 const EXAMPLE_QUESTIONS = [
-  "A customer lost their phone and can't get 2FA codes. They're the only owner.",
-  "How long does a refund take to show up?",
+  "What happens if our card payment fails?",
   "Can we pay by invoice instead of card?",
-  "Slack notifications stopped arriving in a channel",
-  "Do guests use a paid seat?",
+  "How long does a refund take to show up?",
+  "Is support open on Christmas day?",
 ];
 
 const EXAMPLE_TICKET =
   "Hi, our whole workspace suddenly became read-only this morning and nobody can edit boards. We didn't change anything. Can you help? We have a launch tomorrow.";
 
+const MODES: { id: ApprovedMode; label: string; hint: string }[] = [
+  { id: "prefer", label: "Approved first", hint: "Use an approved answer when one matches, otherwise write one from the docs." },
+  { id: "only", label: "Approved only", hint: "Only approved answers. Anything else goes to a human." },
+  { id: "off", label: "Always generate", hint: "Ignore approved answers and write every answer from the docs." },
+];
+
+const stripMarkers = (t: string) => t.replace(/\s?\[\d+(?:\s*,\s*\d+)*\]/g, "");
+
 function useBackend(): { backend: Backend | null; settings: Settings; setSettings: (s: Settings) => void } {
-  const [settings, setSettingsState] = useState<Settings>({ apiUrl: "", token: "" });
+  const [settings, setSettingsState] = useState<Settings>({ apiUrl: "", token: "", streamUrl: "" });
   const [demo, setDemo] = useState<Backend | null>(null);
 
   useEffect(() => {
@@ -38,13 +48,13 @@ function useBackend(): { backend: Backend | null; settings: Settings; setSetting
     }
     const s = loadSettings();
     loadDeployedConfig().then((cfg) => {
-      setSettingsState({ ...s, apiUrl: s.apiUrl || cfg.apiUrl || "" });
+      setSettingsState({ ...s, apiUrl: s.apiUrl || cfg.apiUrl || "", streamUrl: s.streamUrl || cfg.streamUrl || "" });
     });
   }, []);
 
   const backend = useMemo(() => {
     if (isDemo) return demo;
-    return settings.apiUrl && settings.token ? new ApiBackend(settings.apiUrl, settings.token) : null;
+    return settings.apiUrl && settings.token ? new ApiBackend(settings.apiUrl, settings.token, settings.streamUrl) : null;
   }, [demo, settings]);
 
   const setSettings = (s: Settings) => {
@@ -95,7 +105,9 @@ export default function AdminApp() {
         <div className="sidebar-foot">
           {stats ? (
             <>
-              <strong>{stats.documents}</strong> docs · <strong>{stats.tickets}</strong> tickets
+              <strong>{stats.documents}</strong> docs, <strong>{stats.tickets}</strong> tickets
+              <br />
+              <strong>{stats.approvedAnswers}</strong> approved answers
               <br />
               <strong>{stats.questionsLast7Days}</strong> questions this week
             </>
@@ -108,16 +120,17 @@ export default function AdminApp() {
       </aside>
 
       <main className="main">
-        {isDemo && (
+        {isDemo && tab !== "evals" && (
           <div className="banner">
             <span>
-              <b>Live demo.</b> This runs the real retrieval pipeline in your browser on a sample help center for a made-up
-              company, Northpine. To keep it free with no API keys, answers are pieced together from the source text instead
-              of written by an LLM. The deployed version uses Claude on AWS Bedrock or OpenAI.
+              <b>Live demo.</b> This runs the real pipeline in your browser on a sample help center for a made-up company,
+              Northpine: retrieval, exact quotes, grounding checks, approved answers and the request queue. To keep it free
+              with no API keys, answers are assembled from source sentences instead of written by an LLM. The deployed
+              version uses Claude on AWS Bedrock or OpenAI.
             </span>
           </div>
         )}
-        {!isDemo && !backend && tab !== "settings" && (
+        {!isDemo && !backend && tab !== "settings" && tab !== "evals" && (
           <div className="banner">
             <span>
               <b>Not connected.</b> Add your API URL and admin token in{" "}
@@ -130,95 +143,155 @@ export default function AdminApp() {
         )}
         {tab === "ask" && <AskView backend={backend} onDone={refreshStats} />}
         {tab === "draft" && <DraftView backend={backend} onDone={refreshStats} />}
+        {tab === "approved" && <ApprovedView backend={backend} onChange={refreshStats} />}
         {tab === "docs" && <DocsView backend={backend} stats={stats} onChange={refreshStats} />}
+        {tab === "evals" && <EvalsView />}
         {tab === "settings" && <SettingsView settings={settings} onSave={setSettings} backend={backend} />}
       </main>
     </div>
   );
 }
 
-function useRun(backend: Backend | null, onDone: () => void) {
-  const [result, setResult] = useState<AssistantResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const run = async (fn: (b: Backend) => Promise<AssistantResult>) => {
-    if (!backend) return setError("Connect to an API in Settings first.");
-    setLoading(true);
-    setError("");
-    try {
-      setResult(await fn(backend));
-      onDone();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  };
-  return { result, loading, error, run };
+interface StreamState {
+  text: string;
+  sources: SourcePreview[];
+  status: string;
+  result: AssistantResult | null;
+  loading: boolean;
+  error: string;
 }
 
-function Loading() {
+const EMPTY: StreamState = { text: "", sources: [], status: "", result: null, loading: false, error: "" };
+
+/** Runs one streamed request at a time; a new one cancels the last. */
+function useStream(backend: Backend | null, onDone: () => void) {
+  const [state, setState] = useState<StreamState>(EMPTY);
+  const abort = useRef<AbortController | null>(null);
+  useEffect(() => () => abort.current?.abort(), []);
+
+  const run = async (fn: (b: Backend, onEvent: OnEvent, signal: AbortSignal) => Promise<AssistantResult>) => {
+    if (!backend) return setState({ ...EMPTY, error: "Connect to an API in Settings first." });
+    abort.current?.abort();
+    const ac = new AbortController();
+    abort.current = ac;
+    setState({ ...EMPTY, loading: true, status: "Searching the knowledge base" });
+    const onEvent = (e: StreamEvent) => {
+      if (ac.signal.aborted) return;
+      setState((s) => {
+        if (e.type === "sources") return { ...s, sources: e.sources, status: "Writing" };
+        if (e.type === "status") return { ...s, status: e.message };
+        if (e.type === "delta") return { ...s, text: s.text + e.text, status: "" };
+        return s;
+      });
+    };
+    try {
+      const result = await fn(backend, onEvent, ac.signal);
+      if (!ac.signal.aborted) setState((s) => ({ ...s, result, text: result.text, loading: false, status: "" }));
+      onDone();
+    } catch (e) {
+      if (!ac.signal.aborted) setState((s) => ({ ...s, loading: false, status: "", error: (e as Error).message }));
+    }
+  };
+  return { ...state, run };
+}
+
+function StreamingBody({ state, onCite }: { state: StreamState; onCite: (n: number) => void }) {
+  if (!state.loading) return null;
   return (
-    <div className="card">
-      <div className="skeleton" style={{ width: "92%" }} />
-      <div className="skeleton" style={{ width: "78%" }} />
-      <div className="skeleton" style={{ width: "60%" }} />
-    </div>
+    <>
+      {state.text ? (
+        <div className="card stack">
+          <RichText text={state.text} citations={[]} validNumbers={state.sources.map((s) => s.n)} onCite={onCite} streaming />
+          {state.status && <div className="meta-line">{state.status}</div>}
+        </div>
+      ) : (
+        <div className="card">
+          <div className="status-line">
+            <span className="spinner" /> {state.status || "Working"}
+          </div>
+        </div>
+      )}
+      {state.sources.length > 0 && <SourcePreviews sources={state.sources} />}
+    </>
   );
 }
 
 function AskView({ backend, onDone }: { backend: Backend | null; onDone: () => void }) {
   const [question, setQuestion] = useState("");
-  const { result, loading, error, run } = useRun(backend, onDone);
+  const [asked, setAsked] = useState("");
+  const [mode, setMode] = useState<ApprovedMode>("prefer");
+  const s = useStream(backend, onDone);
   const { flash, onCite } = useCiteFlash();
   const submit = (q = question) => {
-    if (q.trim()) run((b) => b.ask(q));
+    if (!q.trim()) return;
+    setAsked(q);
+    s.run((b, onEvent, signal) => b.ask(q, mode, onEvent, signal));
   };
+  const result = s.result;
 
   return (
     <div className="stack">
       <div className="page-head">
         <h1>Ask the knowledge base</h1>
-        <p>Answers come only from your help docs and resolved tickets, with a source for every claim.</p>
+        <p>Answers come only from your help docs and resolved tickets. Each sentence links to the passage it was taken from.</p>
       </div>
       <div className="card stack">
         <textarea
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !loading) submit();
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !s.loading) submit();
           }}
           placeholder="e.g. How do I reset 2FA for a customer who lost their phone?"
           rows={3}
           aria-label="Question"
         />
         <div className="row">
-          <div className="chips grow">
-            {EXAMPLE_QUESTIONS.slice(0, 4).map((q) => (
-              <button
-                key={q}
-                className="chip"
-                onClick={() => {
-                  setQuestion(q);
-                  submit(q);
-                }}
-              >
-                {q.length > 46 ? `${q.slice(0, 44)}…` : q}
+          <div className="segmented" role="radiogroup" aria-label="Approved answers">
+            {MODES.map((m) => (
+              <button key={m.id} role="radio" aria-checked={mode === m.id} className={mode === m.id ? "on" : ""} title={m.hint} onClick={() => setMode(m.id)}>
+                {m.label}
               </button>
             ))}
           </div>
-          <button className="btn primary" onClick={() => submit()} disabled={loading || !question.trim()}>
-            {loading ? <span className="spinner" /> : null} Ask
+          <span className="grow meta-line">{MODES.find((m) => m.id === mode)!.hint}</span>
+          <button className="btn primary" onClick={() => submit()} disabled={s.loading || !question.trim()}>
+            {s.loading ? <span className="spinner" /> : null} Ask
           </button>
         </div>
+        <div className="chips">
+          {EXAMPLE_QUESTIONS.map((q) => (
+            <button
+              key={q}
+              className="chip"
+              onClick={() => {
+                setQuestion(q);
+                submit(q);
+              }}
+            >
+              {q}
+            </button>
+          ))}
+        </div>
       </div>
-      {error && <div className="error">{error}</div>}
-      {loading && <Loading />}
-      {result && !loading && (
+      {s.error && <div className="error">{s.error}</div>}
+      <StreamingBody state={s} onCite={onCite} />
+      {result && !s.loading && (
         <>
           <div className="card stack">
-            <RichText text={result.text} citations={result.citations} onCite={onCite} />
+            {result.mode === "approved" ? (
+              <>
+                <ApprovedText text={result.text} />
+                <ApprovedSources result={result} />
+              </>
+            ) : (
+              <>
+                <RichText text={result.text} citations={result.citations} onCite={onCite} />
+                <GroundingNote grounding={result.grounding} />
+              </>
+            )}
             <ResultMeta result={result} />
+            {result.mode === "generated" && <ApproveForm backend={backend} question={asked} result={result} onSaved={onDone} />}
           </div>
           <Sources citations={result.citations} flash={flash} />
         </>
@@ -227,38 +300,105 @@ function AskView({ backend, onDone }: { backend: Backend | null; onDone: () => v
   );
 }
 
+/** Turn a generated answer into an approved one, after a person reviews and edits it. */
+function ApproveForm({ backend, question, result, onSaved }: { backend: Backend | null; question: string; result: AssistantResult; onSaved: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState(question);
+  const [answer, setAnswer] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    setOpen(false);
+    setMsg(null);
+  }, [result]);
+
+  if (!open) {
+    return (
+      <div className="row">
+        <button
+          className="btn small"
+          onClick={() => {
+            setQ(question);
+            setAnswer(stripMarkers(result.text));
+            setOpen(true);
+          }}
+        >
+          Save as approved answer
+        </button>
+        {msg && <span className={msg.ok ? "success" : "error"}>{msg.text}</span>}
+      </div>
+    );
+  }
+  const sources = [...new Map(result.citations.map((c) => [c.title, { title: c.title, url: c.url }])).values()];
+  const save = async () => {
+    try {
+      await backend!.addApproved({ question: q, answer, sources });
+      setOpen(false);
+      setMsg({ ok: true, text: "Saved. Matching questions now get this text word for word." });
+      onSaved();
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    }
+  };
+  return (
+    <div className="approve-form stack">
+      <div className="section-title" style={{ margin: 0 }}>
+        New approved answer
+      </div>
+      <div>
+        <label htmlFor="ap-q">Question it answers</label>
+        <input id="ap-q" type="text" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+      <div>
+        <label htmlFor="ap-a">Answer, exactly as customers should see it</label>
+        <textarea id="ap-a" value={answer} onChange={(e) => setAnswer(e.target.value)} rows={5} />
+        <div className="hint">Sources kept with it: {sources.map((s) => s.title).join(", ") || "none"}.</div>
+      </div>
+      <div className="row">
+        <button className="btn primary small" onClick={save} disabled={!q.trim() || !answer.trim()}>
+          Save
+        </button>
+        <button className="btn small" onClick={() => setOpen(false)}>
+          Cancel
+        </button>
+        {msg && <span className="error">{msg.text}</span>}
+      </div>
+    </div>
+  );
+}
+
 function DraftView({ backend, onDone }: { backend: Backend | null; onDone: () => void }) {
   const [ticket, setTicket] = useState("");
   const [draft, setDraft] = useState("");
   const [copied, setCopied] = useState(false);
-  const { result, loading, error, run } = useRun(backend, onDone);
+  const s = useStream(backend, onDone);
   const { flash, onCite } = useCiteFlash();
+  const result = s.result;
 
   useEffect(() => {
     if (result) setDraft(result.text);
   }, [result]);
 
   const copy = async () => {
-    const clean = draft.replace(/\s?\[\d+(?:\s*,\s*\d+)*\]/g, "");
-    await navigator.clipboard.writeText(clean);
+    await navigator.clipboard.writeText(stripMarkers(draft));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+  const submit = () => ticket.trim() && !s.loading && s.run((b, onEvent, signal) => b.draft(ticket, onEvent, signal));
 
   return (
     <div className="stack">
       <div className="page-head">
         <h1>Draft a reply</h1>
-        <p>Paste a customer&apos;s message. You get a reply to review, edit and send, with sources to check.</p>
+        <p>Paste a customer&apos;s message. You get a reply to review, edit and send, with the passages it relies on.</p>
       </div>
       <div className="card stack">
         <textarea
           value={ticket}
           onChange={(e) => setTicket(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && ticket.trim() && !loading) run((b) => b.draft(ticket));
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           }}
-          placeholder="Paste the customer's message…"
+          placeholder="Paste the customer's message"
           rows={5}
           aria-label="Customer message"
         />
@@ -267,14 +407,14 @@ function DraftView({ backend, onDone }: { backend: Backend | null; onDone: () =>
             Use an example ticket
           </button>
           <span className="grow" />
-          <button className="btn primary" onClick={() => ticket.trim() && run((b) => b.draft(ticket))} disabled={loading || !ticket.trim()}>
-            {loading ? <span className="spinner" /> : null} Draft reply
+          <button className="btn primary" onClick={submit} disabled={s.loading || !ticket.trim()}>
+            {s.loading ? <span className="spinner" /> : null} Draft reply
           </button>
         </div>
       </div>
-      {error && <div className="error">{error}</div>}
-      {loading && <Loading />}
-      {result && !loading && (
+      {s.error && <div className="error">{s.error}</div>}
+      <StreamingBody state={s} onCite={onCite} />
+      {result && !s.loading && (
         <>
           <div className="card stack">
             <div className="row" style={{ justifyContent: "space-between" }}>
@@ -290,11 +430,135 @@ function DraftView({ backend, onDone }: { backend: Backend | null; onDone: () =>
               Preview
             </div>
             <RichText text={draft} citations={result.citations} onCite={onCite} />
+            <GroundingNote grounding={result.grounding} />
             <ResultMeta result={result} />
           </div>
           <Sources citations={result.citations} flash={flash} />
         </>
       )}
+    </div>
+  );
+}
+
+function ApprovedView({ backend, onChange }: { backend: Backend | null; onChange: () => void }) {
+  const [items, setItems] = useState<ApprovedAnswer[]>([]);
+  const [editing, setEditing] = useState<ApprovedAnswer | "new" | null>(null);
+  const [q, setQ] = useState("");
+  const [a, setA] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    backend?.listApproved().then(setItems).catch((e) => setMsg({ ok: false, text: e.message }));
+  }, [backend]);
+  useEffect(load, [load]);
+
+  const edit = (item: ApprovedAnswer | "new") => {
+    setEditing(item);
+    setQ(item === "new" ? "" : item.question);
+    setA(item === "new" ? "" : item.answer);
+    setMsg(null);
+  };
+  const act = async (fn: () => Promise<string>) => {
+    if (!backend) return setMsg({ ok: false, text: "Connect to an API in Settings first." });
+    setBusy(true);
+    try {
+      setMsg({ ok: true, text: await fn() });
+      load();
+      onChange();
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = () =>
+    act(async () => {
+      if (editing === "new") await backend!.addApproved({ question: q, answer: a });
+      else if (editing) await backend!.updateApproved(editing.id, { question: q, answer: a, sources: editing.sources });
+      setEditing(null);
+      return "Saved.";
+    });
+  const remove = (item: ApprovedAnswer) => {
+    if (!window.confirm(`Delete the approved answer for "${item.question}"?`)) return;
+    act(async () => {
+      await backend!.deleteApproved(item.id);
+      return "Deleted.";
+    });
+  };
+
+  return (
+    <div className="stack">
+      <div className="page-head">
+        <h1>Approved answers</h1>
+        <p>
+          Answers a support lead signed off on. When a question matches one, the stored text is returned word for word,
+          with no model call. Save one from any answer on the Ask page, or write one here.
+        </p>
+      </div>
+      <div className="row">
+        <button className="btn primary" onClick={() => edit("new")} disabled={busy}>
+          New approved answer
+        </button>
+        {msg && <span className={msg.ok ? "success" : "error"}>{msg.text}</span>}
+      </div>
+      {editing && (
+        <div className="card stack">
+          <div>
+            <label htmlFor="aq">Question</label>
+            <input id="aq" type="text" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Can we pay by invoice?" />
+            <div className="hint">Questions that ask the same thing in other words also match.</div>
+          </div>
+          <div>
+            <label htmlFor="aa">Answer, exactly as customers should see it</label>
+            <textarea id="aa" value={a} onChange={(e) => setA(e.target.value)} rows={5} />
+          </div>
+          <div className="row">
+            <button className="btn primary small" onClick={save} disabled={busy || !q.trim() || !a.trim()}>
+              Save
+            </button>
+            <button className="btn small" onClick={() => setEditing(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Question</th>
+              <th>Answer</th>
+              <th>Updated</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={item.id}>
+                <td className="cell-title">{item.question}</td>
+                <td className="cell-answer">{item.answer}</td>
+                <td className="meta-line">{new Date(item.updatedAt).toLocaleDateString()}</td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button className="btn small" onClick={() => edit(item)} disabled={busy}>
+                    Edit
+                  </button>{" "}
+                  <button className="btn small danger" onClick={() => remove(item)} disabled={busy}>
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {!items.length && (
+              <tr>
+                <td colSpan={4} className="meta-line">
+                  No approved answers yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -446,10 +710,12 @@ function DocsView({ backend, stats, onChange }: { backend: Backend | null; stats
 
 function SettingsView({ settings, onSave, backend }: { settings: Settings; onSave: (s: Settings) => void; backend: Backend | null }) {
   const [apiUrl, setApiUrl] = useState(settings.apiUrl);
+  const [streamUrl, setStreamUrl] = useState(settings.streamUrl);
   const [token, setToken] = useState(settings.token);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   useEffect(() => {
     setApiUrl(settings.apiUrl);
+    setStreamUrl(settings.streamUrl);
     setToken(settings.token);
   }, [settings]);
 
@@ -469,11 +735,12 @@ function SettingsView({ settings, onSave, backend }: { settings: Settings; onSav
   }
 
   const test = async () => {
-    onSave({ apiUrl: apiUrl.trim(), token: token.trim() });
+    const next = { apiUrl: apiUrl.trim(), token: token.trim(), streamUrl: streamUrl.trim() };
+    onSave(next);
     setStatus(null);
     try {
-      const s = await new ApiBackend(apiUrl.trim(), token.trim()).stats();
-      setStatus({ ok: true, text: `Connected. ${s.documents} docs and ${s.tickets} tickets indexed.` });
+      const s = await new ApiBackend(next.apiUrl, next.token, next.streamUrl).stats();
+      setStatus({ ok: true, text: `Connected. ${s.documents} docs, ${s.tickets} tickets and ${s.approvedAnswers} approved answers.` });
     } catch (e) {
       setStatus({ ok: false, text: (e as Error).message });
     }
@@ -490,6 +757,11 @@ function SettingsView({ settings, onSave, backend }: { settings: Settings; onSav
           <label htmlFor="api">API URL</label>
           <input id="api" type="url" value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder="https://abc123.execute-api.us-east-1.amazonaws.com" />
           <div className="hint">The ApiUrl output from the deploy, or http://localhost:8787 for local dev.</div>
+        </div>
+        <div>
+          <label htmlFor="stream">Streaming URL (optional)</label>
+          <input id="stream" type="url" value={streamUrl} onChange={(e) => setStreamUrl(e.target.value)} placeholder="https://abc123.lambda-url.us-east-1.on.aws" />
+          <div className="hint">The StreamUrl output from the deploy. Leave empty for local dev.</div>
         </div>
         <div>
           <label htmlFor="token">Admin token</label>

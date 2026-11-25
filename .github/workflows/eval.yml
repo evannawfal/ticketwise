@@ -1,0 +1,112 @@
+name: Grounding benchmark
+
+# Runs the 30-question benchmark on every pull request and push to main.
+# Pull requests that make answers less grounded than main fail this check,
+# which branch protection requires before merging. Each run on main is added
+# to the score history on the eval-history branch, with a chart.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  benchmark:
+    name: Grounding benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Run the benchmark (offline models, deterministic)
+        id: run
+        run: npm run eval
+
+      - name: Fetch the score history from main
+        run: |
+          if git fetch --depth=1 origin eval-history 2>/dev/null; then
+            git show FETCH_HEAD:history.json > evals/results/history.json
+          else
+            echo '{"schema":1,"runs":[]}' > evals/results/history.json
+          fi
+
+      - name: Compare with main
+        id: gate
+        working-directory: evals
+        run: >
+          npx tsx src/compare.ts
+          --current results/latest.json
+          --history results/history.json
+          --out results/report.md
+          --base "${{ github.event.pull_request.base.sha }}"
+          --chart "https://github.com/${{ github.repository }}/blob/eval-history/score.svg"
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('evals/results/report.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("evals/results/report.md", "utf8");
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find((c) => c.body?.includes("<!-- ticketwise-eval -->"));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      - name: Record the score on main
+        if: always() && github.event_name == 'push' && steps.run.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin eval-history:eval-history 2>/dev/null; then
+            git worktree add history eval-history
+          else
+            git worktree add --orphan -b eval-history history
+          fi
+          (cd evals && npx tsx src/record.ts \
+            --result results/latest.json \
+            --dir ../history \
+            --subject "$(git log -1 --format=%s)" \
+            --committed-at "$(git log -1 --format=%cI)")
+          cd history
+          git add history.json latest.json score.svg
+          git commit -m "Benchmark ${GITHUB_SHA::7}: $(node -p 'require("./latest.json").summary.score')" || exit 0
+          git push origin eval-history
+
+  live:
+    name: Live model benchmark (informational)
+    # Costs a few cents per run, so only on main and by hand, and only if a key is configured.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run against gpt-4.1-mini and OpenAI embeddings
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "No OPENAI_API_KEY secret; skipping the live run." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm run eval -- --provider openai --out results/live.json | tee live.txt
+          { echo '## Live model benchmark'; echo '```'; grep -vE '^>|^$' live.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

@@ -9,7 +9,8 @@
     "start": "tsx src/local-server.ts",
     "migrate": "tsx src/scripts/migrate.ts",
     "seed": "tsx src/scripts/seed.ts",
-    "reset": "tsx src/scripts/seed.ts --reset"
+    "reset": "tsx src/scripts/seed.ts --reset",
+    "loadtest": "tsx src/scripts/loadtest.ts"
   },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.700.0",

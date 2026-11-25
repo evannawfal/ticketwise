@@ -1,5 +1,17 @@
 import pg from "pg";
-import type { ChunkWithEmbedding, DocumentInput, DocumentRecord, SearchHit, Stats, VectorStore } from "../types.js";
+import { RATE_LIMIT_SQL } from "./pg-budget.js";
+import type {
+  ApprovedAnswer,
+  ApprovedAnswerInput,
+  ApprovedHit,
+  ApprovedSource,
+  ChunkWithEmbedding,
+  DocumentInput,
+  DocumentRecord,
+  SearchHit,
+  Stats,
+  VectorStore,
+} from "../types.js";
 
 export function schemaSql(dimensions: number): string {
   if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 2000) {
@@ -39,6 +51,19 @@ CREATE TABLE IF NOT EXISTS questions (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS questions_created_idx ON questions (created_at);
+
+-- Answers a support lead signed off on. Returned word for word when a question matches.
+-- Few enough rows that an exact scan beats an index.
+CREATE TABLE IF NOT EXISTS approved_answers (
+  id         text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  question   text NOT NULL,
+  answer     text NOT NULL,
+  sources    jsonb NOT NULL DEFAULT '[]',
+  embedding  vector(${dimensions}) NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+${RATE_LIMIT_SQL}
 `;
 }
 
@@ -72,6 +97,27 @@ interface DocRow {
   chunk_count: number;
   created_at: Date;
 }
+
+interface ApprovedRow {
+  id: string;
+  question: string;
+  answer: string;
+  sources: ApprovedSource[];
+  created_at: Date;
+  updated_at: Date;
+  score?: number;
+}
+
+const APPROVED_COLS = "id, question, answer, sources, created_at, updated_at";
+
+const toApproved = (r: ApprovedRow): ApprovedAnswer => ({
+  id: r.id,
+  question: r.question,
+  answer: r.answer,
+  sources: r.sources ?? [],
+  createdAt: r.created_at.toISOString(),
+  updatedAt: r.updated_at.toISOString(),
+});
 
 const toRecord = (r: DocRow): DocumentRecord => ({
   id: r.id,
@@ -170,18 +216,64 @@ export class PgVectorStore implements VectorStore {
   }
 
   async stats(): Promise<Stats> {
-    const { rows } = await this.pool.query<{ documents: string; tickets: string; chunks: string; questions: string }>(`
+    const { rows } = await this.pool.query<{ documents: string; tickets: string; chunks: string; questions: string; approved: string }>(`
       SELECT
         (SELECT count(*) FROM documents WHERE source_type = 'doc')    AS documents,
         (SELECT count(*) FROM documents WHERE source_type = 'ticket') AS tickets,
         (SELECT count(*) FROM chunks)                                 AS chunks,
-        (SELECT count(*) FROM questions WHERE created_at > now() - interval '7 days') AS questions`);
+        (SELECT count(*) FROM questions WHERE created_at > now() - interval '7 days') AS questions,
+        (SELECT count(*) FROM approved_answers)                       AS approved`);
     const r = rows[0];
     return {
       documents: Number(r.documents),
       tickets: Number(r.tickets),
       chunks: Number(r.chunks),
       questionsLast7Days: Number(r.questions),
+      approvedAnswers: Number(r.approved),
     };
   }
+
+  async addApproved(input: ApprovedAnswerInput & { id?: string }, embedding: number[]): Promise<ApprovedAnswer> {
+    const { rows } = await this.pool.query<ApprovedRow>(
+      `INSERT INTO approved_answers (id, question, answer, sources, embedding)
+       VALUES (COALESCE($1, gen_random_uuid()::text), $2, $3, $4, $5::vector)
+       RETURNING ${APPROVED_COLS}`,
+      [input.id ?? null, input.question, input.answer, JSON.stringify(input.sources ?? []), toVector(embedding)],
+    );
+    return toApproved(rows[0]);
+  }
+
+  async updateApproved(id: string, input: ApprovedAnswerInput, embedding: number[]): Promise<ApprovedAnswer | null> {
+    const { rows } = await this.pool.query<ApprovedRow>(
+      `UPDATE approved_answers
+          SET question = $2, answer = $3, sources = COALESCE($4, sources), embedding = $5::vector, updated_at = now()
+        WHERE id = $1
+        RETURNING ${APPROVED_COLS}`,
+      [id, input.question, input.answer, input.sources ? JSON.stringify(input.sources) : null, toVector(embedding)],
+    );
+    return rows[0] ? toApproved(rows[0]) : null;
+  }
+
+  async listApproved(): Promise<ApprovedAnswer[]> {
+    const { rows } = await this.pool.query<ApprovedRow>(
+      `SELECT ${APPROVED_COLS} FROM approved_answers ORDER BY updated_at DESC LIMIT 1000`,
+    );
+    return rows.map(toApproved);
+  }
+
+  async deleteApproved(id: string): Promise<boolean> {
+    const res = await this.pool.query(`DELETE FROM approved_answers WHERE id = $1`, [id]);
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async searchApproved(embedding: number[], k: number): Promise<ApprovedHit[]> {
+    const { rows } = await this.pool.query<ApprovedRow>(
+      `SELECT ${APPROVED_COLS}, 1 - (embedding <=> $1::vector) AS score
+         FROM approved_answers ORDER BY embedding <=> $1::vector LIMIT $2`,
+      [toVector(embedding), k],
+    );
+    return rows.map((r) => ({ ...toApproved(r), score: Number(r.score) }));
+  }
 }
+
+export { PgBudget } from "./pg-budget.js";

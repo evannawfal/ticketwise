@@ -1,5 +1,6 @@
-import type { EmbeddingProvider, GenerateRequest, LlmProvider, SearchHit } from "../types.js";
+import { ABSTAIN_TEXT } from "../prompts.js";
 import { splitSentences, tokenize } from "../text.js";
+import type { EmbeddingProvider, GenerateRequest, LlmChunk, LlmProvider, SearchHit } from "../types.js";
 
 /** FNV-1a 32-bit hash. */
 function fnv1a(s: string): number {
@@ -111,7 +112,7 @@ export class ExtractiveLlm implements LlmProvider {
     if (!lines.length) {
       return req.task === "draft"
         ? "Hi there,\n\nThanks for reaching out. I'm checking this with the team and will get back to you shortly.\n\nBest,\nSupport Team"
-        : "I couldn't find this in the knowledge base. It may need a human agent.";
+        : ABSTAIN_TEXT;
     }
 
     if (req.task === "draft") {
@@ -130,5 +131,11 @@ export class ExtractiveLlm implements LlmProvider {
       return `Hi there,\n\nThanks for reaching out. Here's what should help:\n\n${steps}\n\nIf that doesn't fix it, reply here and we'll take a closer look.\n\nBest,\nSupport Team`;
     }
     return lines.map((l) => `${l.text} [${l.n}]`).join(" ");
+  }
+
+  /** Streams the same text a word at a time, like a model would. */
+  async *stream(req: GenerateRequest): AsyncIterable<LlmChunk> {
+    const text = await this.generate(req);
+    for (const piece of text.match(/\S+\s*/g) ?? []) yield { type: "text", text: piece };
   }
 }

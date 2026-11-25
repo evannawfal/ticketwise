@@ -1,9 +1,18 @@
 import { createHmac } from "node:crypto";
-import { ExtractiveLlm, LocalHashEmbeddings, MemoryStore, SupportAssistant } from "@ticketwise/core";
+import {
+  ExtractiveLlm,
+  LocalHashEmbeddings,
+  MemoryStore,
+  ProviderError,
+  QueueFullError,
+  QueueTimeoutError,
+  SupportAssistant,
+  type StreamEvent,
+} from "@ticketwise/core";
 import { PgVectorStore, createPool, migrate } from "@ticketwise/core/pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { parseEmbeddingDim, parseMinScore } from "../src/config.js";
-import { createRouter, type HttpRequest } from "../src/http.js";
+import { parseEmbeddingDim, parseLimits, parseMinScore } from "../src/config.js";
+import { createRouter, createStreamHandler, describeError, type HttpRequest } from "../src/http.js";
 import { parseSlackRequest, runSlackJob, verifySlackSignature } from "../src/slack.js";
 import { sampleDocs } from "../../../packages/core/test/helpers.js";
 
@@ -80,6 +89,93 @@ describe("HTTP API", () => {
   });
 });
 
+describe("streaming endpoint", () => {
+  async function open(body: unknown, path = "/ask/stream", token: string | null = TOKEN) {
+    const { assistant } = makeRouter();
+    for (const d of sampleDocs()) await assistant.ingest(d);
+    const stream = createStreamHandler({ assistant, adminToken: TOKEN, allowedOrigin: "*" });
+    return stream(req("POST", path, body, token));
+  }
+  async function events(res: Awaited<ReturnType<typeof open>>): Promise<StreamEvent[]> {
+    expect(typeof res.body).not.toBe("string");
+    let raw = "";
+    for await (const chunk of res.body as AsyncIterable<string>) raw += chunk;
+    return raw
+      .split("\n\n")
+      .filter(Boolean)
+      .map((e) => JSON.parse(e.replace(/^data: /, "")) as StreamEvent);
+  }
+
+  it("streams sources, text and a final result as server-sent events", async () => {
+    const res = await open({ question: "How long does a refund take to show up?" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+    const evs = await events(res);
+    expect(evs[0].type).toBe("sources");
+    const done = evs.at(-1) as Extract<StreamEvent, { type: "done" }>;
+    expect(done.type).toBe("done");
+    expect(done.result.citations[0].quotes.length).toBeGreaterThan(0);
+  });
+
+  it("streams drafts too", async () => {
+    const evs = await events(await open({ ticket: "Our workspace went read only" }, "/draft/stream"));
+    expect((evs.at(-1) as Extract<StreamEvent, { type: "done" }>).result.text).toMatch(/^Hi there,/);
+  });
+
+  it("rejects bad requests with a status code before the stream opens", async () => {
+    expect((await open({ question: "x" }, "/ask/stream", "wrong-token-123456")).statusCode).toBe(401);
+    expect((await open({ question: "   " })).statusCode).toBe(400);
+    expect((await open({ question: "hi", mode: "sometimes" })).statusCode).toBe(400);
+    expect((await open({ question: "hi" }, "/nope/stream")).statusCode).toBe(404);
+  });
+
+  it("reports a failure mid-stream as an error event", async () => {
+    const store = new MemoryStore();
+    const assistant = new SupportAssistant({
+      store,
+      embeddings: new LocalHashEmbeddings(),
+      minScore: 0.12,
+      llm: { name: "broken", generate: async () => { throw new ProviderError("upstream 500", 500); } },
+    });
+    for (const d of sampleDocs()) await assistant.ingest(d);
+    const res = await createStreamHandler({ assistant, adminToken: TOKEN, allowedOrigin: "*" })(
+      req("POST", "/ask/stream", { question: "How long does a refund take?" }),
+    );
+    const evs = await events(res);
+    expect(evs.at(-1)).toEqual({ type: "error", status: 502, message: "The model provider returned an error. Try again in a moment." });
+  });
+});
+
+describe("approved answers API", () => {
+  it("creates, matches, edits and deletes approved answers", async () => {
+    const { handle, assistant } = makeRouter();
+    for (const d of sampleDocs()) await assistant.ingest(d);
+    const answer = "Yes, within 14 days.  Exactly like this.";
+    const created = await handle(req("POST", "/approved", { question: "Can I get a refund on an annual plan?", answer, sources: [{ title: "Refund policy", url: "https://x.example/r" }] }));
+    expect(created.statusCode).toBe(201);
+    const id = JSON.parse(created.body).approved.id;
+
+    const asked = JSON.parse((await handle(req("POST", "/ask", { question: "Can I get a refund on my annual plan?" }))).body);
+    expect(asked).toMatchObject({ mode: "approved", text: answer, approved: { id } });
+    const off = JSON.parse((await handle(req("POST", "/ask", { question: "Can I get a refund on my annual plan?", mode: "off" }))).body);
+    expect(off.mode).toBe("generated");
+
+    const edited = await handle(req("PUT", `/approved/${id}`, { question: "Can I get a refund on an annual plan?", answer: "Changed." }));
+    expect(JSON.parse(edited.body).approved.answer).toBe("Changed.");
+    expect(JSON.parse((await handle(req("GET", "/approved"))).body).approved).toHaveLength(1);
+    expect((await handle(req("DELETE", `/approved/${id}`))).statusCode).toBe(200);
+    expect((await handle(req("DELETE", `/approved/${id}`))).statusCode).toBe(404);
+  });
+
+  it("validates approved answers", async () => {
+    const { handle } = makeRouter();
+    expect((await handle(req("POST", "/approved", { question: "q" }))).statusCode).toBe(400);
+    expect((await handle(req("POST", "/approved", { question: "q", answer: "a", sources: [{ title: "t", url: "ftp://x" }] }))).statusCode).toBe(400);
+    expect((await handle(req("POST", "/approved", { question: "q", answer: "a", sources: "nope" }))).statusCode).toBe(400);
+    expect((await handle(req("PUT", "/approved/missing", { question: "q", answer: "a" }))).statusCode).toBe(404);
+  });
+});
+
 describe("config parsing", () => {
   it("validates embedding size and score cutoff", () => {
     expect(parseEmbeddingDim(undefined, "local")).toBe(512);
@@ -89,6 +185,34 @@ describe("config parsing", () => {
     expect(parseMinScore("")).toBeUndefined();
     expect(parseMinScore("0.25")).toBe(0.25);
     expect(() => parseMinScore("5")).toThrow(/between 0 and 1/);
+  });
+
+  it("reads queue and retry limits with safe defaults", () => {
+    expect(parseLimits({})).toEqual({
+      maxConcurrent: 4,
+      requestsPerMinute: 50,
+      tokensPerMinute: 100_000,
+      maxQueue: 100,
+      queueTimeoutMs: 60_000,
+      maxRetries: 4,
+      sharedBudget: false,
+    });
+    expect(parseLimits({ LLM_MAX_CONCURRENT: "8", LLM_SHARED_BUDGET: "1" })).toMatchObject({ maxConcurrent: 8, sharedBudget: true });
+    expect(() => parseLimits({ LLM_MAX_CONCURRENT: "0" })).toThrow(/at least 1/);
+    expect(() => parseLimits({ LLM_TOKENS_PER_MINUTE: "lots" })).toThrow(/whole number/);
+  });
+});
+
+describe("error responses", () => {
+  it("tells clients when to come back instead of failing with 500", () => {
+    expect(describeError(new QueueFullError(5000))).toMatchObject({ status: 429, retryAfterMs: 5000 });
+    expect(describeError(new QueueTimeoutError(60_000))).toMatchObject({ status: 503 });
+    expect(describeError(new ProviderError("x", 429, 2000))).toMatchObject({ status: 503, retryAfterMs: 2000 });
+    expect(describeError(new ProviderError("secret detail", 500))).toEqual({
+      status: 502,
+      message: "The model provider returned an error. Try again in a moment.",
+    });
+    expect(describeError(new Error("question is required"))).toMatchObject({ status: 400 });
   });
 });
 
@@ -153,7 +277,7 @@ describe.skipIf(!dbUrl)("PgVectorStore (real Postgres)", () => {
   const assistant = new SupportAssistant({ store, embeddings: new LocalHashEmbeddings(), llm: new ExtractiveLlm(), minScore: 0.12 });
 
   beforeAll(async () => {
-    await pool.query("DROP TABLE IF EXISTS chunks, documents, questions CASCADE");
+    await pool.query("DROP TABLE IF EXISTS chunks, documents, questions, approved_answers CASCADE");
     await migrate(pool, 512);
     await migrate(pool, 512); // idempotent
     for (const d of sampleDocs()) await assistant.ingest(d);
@@ -180,6 +304,20 @@ describe.skipIf(!dbUrl)("PgVectorStore (real Postgres)", () => {
     const a = (await assistant.retrieve(q)).map((h) => h.title);
     const b = (await memAssistant.retrieve(q)).map((h) => h.title);
     expect(a[0]).toBe(b[0]);
+  });
+
+  it("stores approved answers and returns them word for word", async () => {
+    const answer = "Yes — for 30 days.\n\nAfter that it's gone.  ";
+    const saved = await assistant.approve({ id: "restore", question: "Can a deleted workspace be restored?", answer, sources: [{ title: "Members" }] });
+    expect(saved).toMatchObject({ id: "restore", sources: [{ title: "Members", url: null }] });
+    const res = await assistant.ask("Can a deleted workspace be restored?");
+    expect(res).toMatchObject({ mode: "approved", text: answer, approved: { id: "restore" } });
+    const updated = await assistant.updateApproved("restore", { question: "Can a deleted workspace be restored?", answer: "No." });
+    expect(updated!.answer).toBe("No.");
+    expect((await store.listApproved()).map((a) => a.id)).toEqual(["restore"]);
+    expect((await store.stats()).approvedAnswers).toBe(1);
+    expect(await store.deleteApproved("restore")).toBe(true);
+    expect(await store.deleteApproved("restore")).toBe(false);
   });
 
   it("cascades chunk deletes", async () => {

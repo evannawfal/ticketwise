@@ -1,4 +1,14 @@
-import type { ChunkWithEmbedding, DocumentInput, DocumentRecord, SearchHit, Stats, VectorStore } from "../types.js";
+import type {
+  ApprovedAnswer,
+  ApprovedAnswerInput,
+  ApprovedHit,
+  ChunkWithEmbedding,
+  DocumentInput,
+  DocumentRecord,
+  SearchHit,
+  Stats,
+  VectorStore,
+} from "../types.js";
 
 export function cosine(a: number[], b: number[]): number {
   let dot = 0;
@@ -21,6 +31,7 @@ export class MemoryStore implements VectorStore {
   private docs = new Map<string, DocumentRecord>();
   private chunks: StoredChunk[] = [];
   private questions: { at: number }[] = [];
+  private approved = new Map<string, ApprovedAnswer & { embedding: number[] }>();
 
   async addDocument(doc: DocumentInput, chunks: ChunkWithEmbedding[]): Promise<DocumentRecord> {
     const record: DocumentRecord = {
@@ -77,6 +88,42 @@ export class MemoryStore implements VectorStore {
       tickets: docs.filter((d) => d.sourceType === "ticket").length,
       chunks: this.chunks.length,
       questionsLast7Days: this.questions.filter((q) => q.at >= weekAgo).length,
+      approvedAnswers: this.approved.size,
     };
+  }
+
+  async addApproved(input: ApprovedAnswerInput & { id?: string }, embedding: number[]): Promise<ApprovedAnswer> {
+    const now = new Date().toISOString();
+    const id = input.id ?? crypto.randomUUID();
+    if (this.approved.has(id)) throw new Error(`approved answer "${id}" already exists`);
+    const rec = { id, question: input.question, answer: input.answer, sources: input.sources ?? [], createdAt: now, updatedAt: now };
+    this.approved.set(id, { ...rec, embedding });
+    return rec;
+  }
+
+  async updateApproved(id: string, input: ApprovedAnswerInput, embedding: number[]): Promise<ApprovedAnswer | null> {
+    const cur = this.approved.get(id);
+    if (!cur) return null;
+    const next = { ...cur, question: input.question, answer: input.answer, sources: input.sources ?? cur.sources, embedding, updatedAt: new Date().toISOString() };
+    this.approved.set(id, next);
+    const { embedding: _, ...rec } = next;
+    return rec;
+  }
+
+  async listApproved(): Promise<ApprovedAnswer[]> {
+    return [...this.approved.values()]
+      .map(({ embedding: _, ...rec }) => rec)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async deleteApproved(id: string): Promise<boolean> {
+    return this.approved.delete(id);
+  }
+
+  async searchApproved(embedding: number[], k: number): Promise<ApprovedHit[]> {
+    return [...this.approved.values()]
+      .map(({ embedding: e, ...rec }) => ({ ...rec, score: cosine(embedding, e) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k);
   }
 }

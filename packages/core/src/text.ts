@@ -6,16 +6,28 @@ const STOPWORDS = new Set(
   ).split(" "),
 );
 
-/** Very small suffix stemmer, enough to match "refunds"/"refunded"/"refund". */
+/**
+ * Very small suffix stemmer, enough to match "refunds"/"refunded"/"refund".
+ * A final "e" is dropped too, so "expire", "expires" and "expired" (and
+ * "code"/"codes", "file"/"files") all meet at the same stem.
+ *
+ * Words of 4 letters or fewer keep their plural ("days" stays "days"). Folding
+ * those too was tried: it let "support ... day" match half the help center and
+ * the benchmark's off-topic questions started getting answers.
+ */
 export function stem(word: string): string {
-  if (word.length <= 4) return word;
-  for (const suffix of ["ations", "ation", "ings", "ing", "ied", "ies", "ed", "es", "ly", "s"]) {
-    if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
-      const base = word.slice(0, -suffix.length);
-      return suffix === "ied" || suffix === "ies" ? `${base}y` : base;
+  if (word.length <= 3) return word;
+  let base = word;
+  if (word.length > 4) {
+    for (const suffix of ["ations", "ation", "ings", "ing", "ied", "ies", "ed", "es", "ly", "s"]) {
+      if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
+        base = word.slice(0, -suffix.length);
+        if (suffix === "ied" || suffix === "ies") base += "y";
+        break;
+      }
     }
   }
-  return word;
+  return base.endsWith("e") ? base.slice(0, -1) : base;
 }
 
 export function tokenize(text: string): string[] {

@@ -32,6 +32,14 @@ export function resultToSlackBlocks(
   for (let i = 0; i < body.length; i += 2900) {
     blocks.push({ type: "section", text: { type: "mrkdwn", text: body.slice(i, i + 2900) } });
   }
+  if (result.mode === "approved" && result.approved) {
+    const sources = result.approved.sources.map((s) => (s.url ? `<${s.url}|${slackEscape(s.title)}>` : slackEscape(s.title)));
+    blocks.push({ type: "divider" });
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: `*Approved answer*${sources.length ? ` · ${sources.join(", ")}` : ""}` }],
+    });
+  }
   if (result.citations.length) {
     const lines = result.citations.map((c) => {
       const label = slackEscape(c.section ? `${c.title} — ${c.section}` : c.title);
