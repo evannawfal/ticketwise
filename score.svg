@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-labelledby="t d">
+<title id="t">Grounding benchmark score by commit on main</title>
+<desc id="d">7435fd7: 77.7, 0f5d2fb: 81.6, c2fc8dc: 81.6, 7531124: 94.9, 129f467: 96.1, 5cd7c87: 96.1, 3baff4a: 96.1, e08e764: 96.1, 8e1d6d3: 96.1</desc>
+<style>
+  svg { --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --grid: #e4e3df; --series: #2a78d6; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  @media (prefers-color-scheme: dark) { svg { --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --grid: #34332f; --series: #3987e5; } }
+  .bg { fill: var(--surface); }
+  .title { fill: var(--ink); font-size: 15px; font-weight: 600; }
+  .sub { fill: var(--ink-2); font-size: 12px; }
+  .grid { stroke: var(--grid); stroke-width: 1; }
+  .tick { fill: var(--ink-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .pt { fill: var(--series); stroke: var(--surface); stroke-width: 2; }
+  .value { fill: var(--ink); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+</style>
+<rect class="bg" width="760" height="300" rx="8"/>
+<text class="title" x="20" y="28">Grounding benchmark score</text>
+<text class="sub" x="20" y="46">9 runs on main, 30 questions each, out of 100</text>
+<line class="grid" x1="60" x2="696" y1="260" y2="260"/><text class="tick" x="52" y="264" text-anchor="end">70</text><line class="grid" x1="60" x2="696" y1="196.66666666666669" y2="196.66666666666669"/><text class="tick" x="52" y="200.66666666666669" text-anchor="end">80</text><line class="grid" x1="60" x2="696" y1="133.33333333333334" y2="133.33333333333334"/><text class="tick" x="52" y="137.33333333333334" text-anchor="end">90</text><line class="grid" x1="60" x2="696" y1="70" y2="70"/><text class="tick" x="52" y="74" text-anchor="end">100</text><text class="tick" x="60" y="278" text-anchor="middle">7435fd7</text><text class="tick" x="219" y="278" text-anchor="middle">c2fc8dc</text><text class="tick" x="378" y="278" text-anchor="middle">129f467</text><text class="tick" x="537" y="278" text-anchor="middle">3baff4a</text><text class="tick" x="696" y="278" text-anchor="middle">8e1d6d3</text>
+<path class="line" d="M60.0,211.2 L139.5,186.5 L219.0,186.5 L298.5,102.3 L378.0,94.7 L457.5,94.7 L537.0,94.7 L616.5,94.7 L696.0,94.7"/>
+<circle class="pt" cx="60.0" cy="211.2" r="4"><title>7435fd7: 77.7
+Add a 30-question grounding benchmark and eval harness</title></circle><circle class="pt" cx="139.5" cy="186.5" r="4"><title>0f5d2fb: 81.6
+Stream answers and quote the exact source passage behind each claim</title></circle><circle class="pt" cx="219.0" cy="186.5" r="4"><title>c2fc8dc: 81.6
+Queue model calls under token limits and retry rate limits</title></circle><circle class="pt" cx="298.5" cy="102.3" r="4"><title>7531124: 94.9
+Add approved answers, returned word for word</title></circle><circle class="pt" cx="378.0" cy="94.7" r="4"><title>129f467: 96.1
+Fix the stemmer splitting 'expire' from 'expires'</title></circle><circle class="pt" cx="457.5" cy="94.7" r="4"><title>5cd7c87: 96.1
+Serve streamed answers and approved answers over the API</title></circle><circle class="pt" cx="537.0" cy="94.7" r="4"><title>3baff4a: 96.1
+Gate merges on the grounding benchmark and chart the score over time</title></circle><circle class="pt" cx="616.5" cy="94.7" r="4"><title>e08e764: 96.1
+Admin: streamed answers with exact quotes, approved answers, evals page</title></circle><circle class="pt" cx="696.0" cy="94.7" r="4"><title>8e1d6d3: 96.1
+README: quotes, approved answers, the request queue and the eval gate</title></circle><text class="value" x="706" y="99.70000000000005">96.1</text>
+</svg>
