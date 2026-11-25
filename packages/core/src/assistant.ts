@@ -68,7 +68,7 @@ export const APPROVED_MODES: readonly ApprovedMode[] = ["off", "prefer", "only"]
  */
 export function tuningFor(embeddings: "local" | "neural"): Pick<AssistantOptions, "minScore" | "minCoverage" | "approvedThreshold"> {
   return embeddings === "local"
-    ? { minScore: 0.12, minCoverage: 0.3, approvedThreshold: 0.74 }
+    ? { minScore: 0.12, minCoverage: 0.3, approvedThreshold: 0.6 }
     : { minScore: 0.3, minCoverage: 0.1, approvedThreshold: 0.83 };
 }
 /** A claim is grounded when a quoted passage from a source it cites covers this share of its words. */
