@@ -67,7 +67,7 @@ export function gate(current: Report, base: HistoryRun | undefined, opts: { char
     const broke = current.cases.filter((c) => was.get(c.id) === true && !c.pass);
     const fixed = current.cases.filter((c) => was.get(c.id) === false && c.pass);
     if (broke.length) {
-      lines.push("", "**Now failing**", "", ...broke.map((c) => `- \`${c.id}\`: ${c.question} — ${c.reason}`));
+      lines.push("", "**Now failing**", "", ...broke.map((c) => `- \`${c.id}\`: ${c.question} (${c.reason})`));
     }
     if (fixed.length) lines.push("", "**Now passing**", "", ...fixed.map((c) => `- \`${c.id}\`: ${c.question}`));
   }

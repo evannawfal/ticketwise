@@ -19,6 +19,7 @@ const docs = readdirSync(docsDir)
   });
 
 const ticketsCsv = readFileSync(join(root, "sample-data/tickets.csv"), "utf8");
+const approved = JSON.parse(readFileSync(join(root, "sample-data/approved-answers.json"), "utf8"));
 const out = join(root, "apps/admin/lib/sample-data.json");
-writeFileSync(out, JSON.stringify({ docs, ticketsCsv }));
-console.log(`wrote ${docs.length} docs + tickets to ${out}`);
+writeFileSync(out, JSON.stringify({ docs, ticketsCsv, approved }));
+console.log(`wrote ${docs.length} docs, tickets and ${approved.length} approved answers to ${out}`);

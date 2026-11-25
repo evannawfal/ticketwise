@@ -88,7 +88,7 @@ export function renderScoreChart(runs: HistoryRun[]): string {
     .map(
       (r, i) =>
         `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(r.summary.score).toFixed(1)}" r="4">` +
-        `<title>${esc(`${r.commit.slice(0, 7)} · ${r.summary.score.toFixed(1)}\n${r.subject}`)}</title></circle>`,
+        `<title>${esc(`${r.commit.slice(0, 7)}: ${r.summary.score.toFixed(1)}\n${r.subject}`)}</title></circle>`,
     )
     .join("");
   const last = runs.at(-1);
@@ -113,7 +113,7 @@ export function renderScoreChart(runs: HistoryRun[]): string {
 </style>
 <rect class="bg" width="${W}" height="${H}" rx="8"/>
 <text class="title" x="${m.left - 28}" y="24">Grounding benchmark score</text>
-<text class="sub" x="${m.left - 28}" y="40">${runs.length} runs on main, ${esc(evalCount(runs))} questions each, 0–100</text>
+<text class="sub" x="${m.left - 28}" y="40">${runs.length} runs on main, ${esc(evalCount(runs))} questions each, out of 100</text>
 ${grid}${xLabels}
 <path class="line" d="${path}"/>
 ${points}${lastLabel}
